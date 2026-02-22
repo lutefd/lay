@@ -2,13 +2,14 @@
   import { tick } from 'svelte';
   import { SendMessage } from '../../wailsjs/go/main/App.js';
   import Markdown from './Markdown.svelte';
+  import type { ChatMessage } from './types.js';
 
-  interface ChatMessage {
-    role: 'user' | 'assistant';
-    content: string;
+  interface Props {
+    messages: ChatMessage[];
   }
 
-  let messages = $state<ChatMessage[]>([]);
+  let { messages = $bindable([]) }: Props = $props();
+
   let input = $state('');
   let loading = $state(false);
   let error = $state('');

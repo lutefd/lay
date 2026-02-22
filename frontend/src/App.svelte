@@ -3,8 +3,10 @@
   import Notes from './lib/Notes.svelte';
   import Chat from './lib/Chat.svelte';
   import Settings from './lib/Settings.svelte';
+  import type { ChatMessage } from './lib/types.js';
 
   let activeTab = $state<'notes' | 'chat' | 'settings'>('notes');
+  let chatMessages = $state<ChatMessage[]>([]);
 </script>
 
 <div class="app">
@@ -14,7 +16,7 @@
     {#if activeTab === 'notes'}
       <Notes />
     {:else if activeTab === 'chat'}
-      <Chat />
+      <Chat bind:messages={chatMessages} />
     {:else}
       <Settings />
     {/if}
