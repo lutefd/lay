@@ -13,30 +13,25 @@ import (
 	openai "github.com/sashabaranov/go-openai"
 )
 
-// App struct holds runtime state.
 type App struct {
 	ctx context.Context
 }
 
-// Config holds user settings persisted to ~/.lay/config.json.
 type Config struct {
 	AnthropicKey string `json:"anthropicKey"`
 	OpenAIKey    string `json:"openaiKey"`
 	Model        string `json:"model"`
 }
 
-// Message is a single chat turn.
 type Message struct {
 	Role    string `json:"role"`
 	Content string `json:"content"`
 }
 
-// NewApp creates a new App instance.
 func NewApp() *App {
 	return &App{}
 }
 
-// startup saves the Wails context and ensures storage directory exists.
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
 	_ = os.MkdirAll(layDir(), 0o755)
@@ -46,8 +41,6 @@ func layDir() string {
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, ".lay")
 }
-
-// ---------- Notes ----------
 
 func (a *App) GetNotes() string {
 	data, err := os.ReadFile(filepath.Join(layDir(), "notes.md"))
@@ -61,8 +54,6 @@ func (a *App) SaveNotes(content string) error {
 	return os.WriteFile(filepath.Join(layDir(), "notes.md"), []byte(content), 0o644)
 }
 
-// ---------- Config ----------
-
 func (a *App) GetConfig() Config {
 	data, err := os.ReadFile(filepath.Join(layDir(), "config.json"))
 	if err != nil {
@@ -72,7 +63,6 @@ func (a *App) GetConfig() Config {
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return Config{Model: "claude-sonnet-4-6"}
 	}
-	// Migrate legacy single-key format (apiKey → anthropicKey).
 	if cfg.AnthropicKey == "" {
 		var raw map[string]string
 		if json.Unmarshal(data, &raw) == nil {
@@ -96,15 +86,12 @@ func (a *App) SaveConfig(anthropicKey string, openAIKey string, model string) er
 	return os.WriteFile(filepath.Join(layDir(), "config.json"), data, 0o600)
 }
 
-// ---------- AI Chat ----------
-
 func isOpenAIModel(model string) bool {
 	return strings.HasPrefix(model, "gpt-") ||
 		strings.HasPrefix(model, "o1") ||
 		strings.HasPrefix(model, "o3")
 }
 
-// SendMessage routes to the correct AI provider based on the selected model.
 func (a *App) SendMessage(conversationJSON string) (string, error) {
 	cfg := a.GetConfig()
 
