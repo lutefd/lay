@@ -7,37 +7,43 @@ package main
 #cgo LDFLAGS: -framework Cocoa
 
 #import <Cocoa/Cocoa.h>
+#import <dispatch/dispatch.h>
 
 // hotkeyFired is implemented in Go.
 extern void hotkeyFired();
 
 static id _hotkeyMonitor = nil;
 
-// ProtectWindow sets NSWindowSharingNone on all windows so the overlay is
-// invisible to screen capture (Google Meet, Zoom, etc.).
+// protectAllWindows must run on the main thread.
 static void protectAllWindows() {
-    for (NSWindow *w in [NSApp windows]) {
-        [w setSharingType:NSWindowSharingNone];
-    }
-}
-
-// registerGlobalHotkey installs a global NSEvent monitor for ⌘+Shift+L.
-static void registerGlobalHotkey() {
-    NSUInteger mask = NSEventModifierFlagCommand | NSEventModifierFlagShift;
-    _hotkeyMonitor = [NSEvent addGlobalMonitorForEventsMatchingMask:NSEventMaskKeyDown
-                                                            handler:^(NSEvent *event) {
-        if ((event.modifierFlags & mask) == mask && event.keyCode == 37) {
-            hotkeyFired();
+    dispatch_async(dispatch_get_main_queue(), ^{
+        for (NSWindow *w in [NSApp windows]) {
+            [w setSharingType:NSWindowSharingNone];
         }
-    }];
+    });
 }
 
-// unregisterGlobalHotkey removes the event monitor.
+// registerGlobalHotkey must run on the main thread.
+static void registerGlobalHotkey() {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        NSUInteger mask = NSEventModifierFlagCommand | NSEventModifierFlagShift;
+        _hotkeyMonitor = [NSEvent addGlobalMonitorForEventsMatchingMask:NSEventMaskKeyDown
+                                                                handler:^(NSEvent *event) {
+            if ((event.modifierFlags & mask) == mask && event.keyCode == 37) {
+                hotkeyFired();
+            }
+        }];
+    });
+}
+
+// unregisterGlobalHotkey must run on the main thread.
 static void unregisterGlobalHotkey() {
-    if (_hotkeyMonitor) {
-        [NSEvent removeMonitor:_hotkeyMonitor];
-        _hotkeyMonitor = nil;
-    }
+    dispatch_sync(dispatch_get_main_queue(), ^{
+        if (_hotkeyMonitor) {
+            [NSEvent removeMonitor:_hotkeyMonitor];
+            _hotkeyMonitor = nil;
+        }
+    });
 }
 */
 import "C"
@@ -53,16 +59,19 @@ func hotkeyFired() {
 }
 
 // ProtectWindow makes the overlay invisible to screen capture.
+// Safe to call from any goroutine — dispatches to main thread internally.
 func ProtectWindow() {
 	C.protectAllWindows()
 }
 
 // RegisterGlobalHotkey sets up ⌘+Shift+L global hotkey.
+// Safe to call from any goroutine — dispatches to main thread internally.
 func RegisterGlobalHotkey() {
 	C.registerGlobalHotkey()
 }
 
 // UnregisterGlobalHotkey removes the global event monitor.
+// Safe to call from any goroutine — dispatches to main thread internally.
 func UnregisterGlobalHotkey() {
 	C.unregisterGlobalHotkey()
 }
