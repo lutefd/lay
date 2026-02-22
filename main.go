@@ -8,7 +8,6 @@ import (
 	"github.com/wailsapp/wails/v2/pkg/options"
 	"github.com/wailsapp/wails/v2/pkg/options/assetserver"
 	"github.com/wailsapp/wails/v2/pkg/options/mac"
-	wailsRuntime "github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
 //go:embed all:frontend/dist
@@ -16,7 +15,6 @@ var assets embed.FS
 
 func main() {
 	app := NewApp()
-	visible := true
 
 	err := wails.Run(&options.App{
 		Title:            "lay",
@@ -32,18 +30,6 @@ func main() {
 			app.startup(ctx)
 			ProtectWindow()
 			RegisterGlobalHotkey()
-
-			// Listen for ⌘+Shift+L and toggle window visibility.
-			go func() {
-				for range hotkeyChannel {
-					if visible {
-						wailsRuntime.WindowHide(ctx)
-					} else {
-						wailsRuntime.WindowShow(ctx)
-					}
-					visible = !visible
-				}
-			}()
 		},
 		OnShutdown: func(ctx context.Context) {
 			UnregisterGlobalHotkey()

@@ -9,12 +9,38 @@ package main
 #import <Cocoa/Cocoa.h>
 #import <dispatch/dispatch.h>
 
-// hotkeyFired is implemented in Go.
-extern void hotkeyFired();
+static id _globalMonitor = nil;
+static id _localMonitor  = nil;
 
-static id _hotkeyMonitor = nil;
+// toggleWindow checks the real window state and minimises or restores accordingly.
+// Must be called on the main thread (called inside dispatch_async blocks below).
+static void toggleWindow() {
+    // Find our content window. mainWindow is nil when the app is hidden,
+    // so fall back to iterating all windows.
+    NSWindow *w = [NSApp mainWindow];
+    if (!w) {
+        for (NSWindow *win in [NSApp windows]) {
+            w = win;
+            break;
+        }
+    }
+    if (!w) return;
 
-// protectAllWindows must run on the main thread.
+    if ([w isMiniaturized]) {
+        // Restore from dock
+        [w deminiaturize:nil];
+        [NSApp activateIgnoringOtherApps:YES];
+    } else if (![NSApp isHidden] && [w isVisible]) {
+        // Visible → minimise to dock
+        [w miniaturize:nil];
+    } else {
+        // Hidden (via NSApp hide) → unhide and bring forward
+        [NSApp unhide:nil];
+        [NSApp activateIgnoringOtherApps:YES];
+        [w makeKeyAndOrderFront:nil];
+    }
+}
+
 static void protectAllWindows() {
     dispatch_async(dispatch_get_main_queue(), ^{
         for (NSWindow *w in [NSApp windows]) {
@@ -23,55 +49,51 @@ static void protectAllWindows() {
     });
 }
 
-// registerGlobalHotkey must run on the main thread.
 static void registerGlobalHotkey() {
     dispatch_async(dispatch_get_main_queue(), ^{
         NSUInteger mask = NSEventModifierFlagCommand | NSEventModifierFlagShift;
-        _hotkeyMonitor = [NSEvent addGlobalMonitorForEventsMatchingMask:NSEventMaskKeyDown
+
+        // Global monitor: fires when a different app is frontmost.
+        _globalMonitor = [NSEvent addGlobalMonitorForEventsMatchingMask:NSEventMaskKeyDown
                                                                 handler:^(NSEvent *event) {
             if ((event.modifierFlags & mask) == mask && event.keyCode == 37) {
-                hotkeyFired();
+                dispatch_async(dispatch_get_main_queue(), ^{ toggleWindow(); });
             }
+        }];
+
+        // Local monitor: fires when this app is frontmost.
+        // Returns nil to consume the event so it doesn't propagate to the webview.
+        _localMonitor = [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskKeyDown
+                                                              handler:^NSEvent *(NSEvent *event) {
+            if ((event.modifierFlags & mask) == mask && event.keyCode == 37) {
+                dispatch_async(dispatch_get_main_queue(), ^{ toggleWindow(); });
+                return nil;
+            }
+            return event;
         }];
     });
 }
 
-// unregisterGlobalHotkey must run on the main thread.
 static void unregisterGlobalHotkey() {
     dispatch_sync(dispatch_get_main_queue(), ^{
-        if (_hotkeyMonitor) {
-            [NSEvent removeMonitor:_hotkeyMonitor];
-            _hotkeyMonitor = nil;
-        }
+        if (_globalMonitor) { [NSEvent removeMonitor:_globalMonitor]; _globalMonitor = nil; }
+        if (_localMonitor)  { [NSEvent removeMonitor:_localMonitor];  _localMonitor  = nil; }
     });
 }
 */
 import "C"
 
-var hotkeyChannel = make(chan struct{}, 1)
-
-//export hotkeyFired
-func hotkeyFired() {
-	select {
-	case hotkeyChannel <- struct{}{}:
-	default:
-	}
-}
-
 // ProtectWindow makes the overlay invisible to screen capture.
-// Safe to call from any goroutine — dispatches to main thread internally.
 func ProtectWindow() {
 	C.protectAllWindows()
 }
 
-// RegisterGlobalHotkey sets up ⌘+Shift+L global hotkey.
-// Safe to call from any goroutine — dispatches to main thread internally.
+// RegisterGlobalHotkey installs ⌘+Shift+L monitors (global + local).
 func RegisterGlobalHotkey() {
 	C.registerGlobalHotkey()
 }
 
-// UnregisterGlobalHotkey removes the global event monitor.
-// Safe to call from any goroutine — dispatches to main thread internally.
+// UnregisterGlobalHotkey removes both event monitors.
 func UnregisterGlobalHotkey() {
 	C.unregisterGlobalHotkey()
 }
