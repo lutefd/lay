@@ -6,9 +6,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	anthropic "github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
+	openai "github.com/sashabaranov/go-openai"
 )
 
 // App struct holds runtime state.
@@ -18,11 +20,12 @@ type App struct {
 
 // Config holds user settings persisted to ~/.lay/config.json.
 type Config struct {
-	APIKey string `json:"apiKey"`
-	Model  string `json:"model"`
+	AnthropicKey string `json:"anthropicKey"`
+	OpenAIKey    string `json:"openaiKey"`
+	Model        string `json:"model"`
 }
 
-// Message is a single chat turn for the Claude API.
+// Message is a single chat turn.
 type Message struct {
 	Role    string `json:"role"`
 	Content string `json:"content"`
@@ -33,14 +36,12 @@ func NewApp() *App {
 	return &App{}
 }
 
-// startup saves the Wails context for later use.
+// startup saves the Wails context and ensures storage directory exists.
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
-	// Ensure ~/.lay/ storage directory exists.
 	_ = os.MkdirAll(layDir(), 0o755)
 }
 
-// layDir returns the path to the ~/.lay storage directory.
 func layDir() string {
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, ".lay")
@@ -48,7 +49,6 @@ func layDir() string {
 
 // ---------- Notes ----------
 
-// GetNotes reads notes from ~/.lay/notes.md. Returns empty string if not found.
 func (a *App) GetNotes() string {
 	data, err := os.ReadFile(filepath.Join(layDir(), "notes.md"))
 	if err != nil {
@@ -57,14 +57,12 @@ func (a *App) GetNotes() string {
 	return string(data)
 }
 
-// SaveNotes writes notes to ~/.lay/notes.md.
 func (a *App) SaveNotes(content string) error {
 	return os.WriteFile(filepath.Join(layDir(), "notes.md"), []byte(content), 0o644)
 }
 
 // ---------- Config ----------
 
-// GetConfig reads ~/.lay/config.json. Returns defaults if not found.
 func (a *App) GetConfig() Config {
 	data, err := os.ReadFile(filepath.Join(layDir(), "config.json"))
 	if err != nil {
@@ -74,15 +72,23 @@ func (a *App) GetConfig() Config {
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return Config{Model: "claude-sonnet-4-6"}
 	}
+	// Migrate legacy single-key format (apiKey → anthropicKey).
+	if cfg.AnthropicKey == "" {
+		var raw map[string]string
+		if json.Unmarshal(data, &raw) == nil {
+			if v := raw["apiKey"]; v != "" {
+				cfg.AnthropicKey = v
+			}
+		}
+	}
 	if cfg.Model == "" {
 		cfg.Model = "claude-sonnet-4-6"
 	}
 	return cfg
 }
 
-// SaveConfig persists API key and model selection to ~/.lay/config.json.
-func (a *App) SaveConfig(apiKey string, model string) error {
-	cfg := Config{APIKey: apiKey, Model: model}
+func (a *App) SaveConfig(anthropicKey string, openAIKey string, model string) error {
+	cfg := Config{AnthropicKey: anthropicKey, OpenAIKey: openAIKey, Model: model}
 	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		return err
@@ -92,22 +98,34 @@ func (a *App) SaveConfig(apiKey string, model string) error {
 
 // ---------- AI Chat ----------
 
-// SendMessage sends a conversation to Claude and returns the assistant reply.
-// conversationJSON is a JSON array of {role, content} objects.
+func isOpenAIModel(model string) bool {
+	return strings.HasPrefix(model, "gpt-") ||
+		strings.HasPrefix(model, "o1") ||
+		strings.HasPrefix(model, "o3")
+}
+
+// SendMessage routes to the correct AI provider based on the selected model.
 func (a *App) SendMessage(conversationJSON string) (string, error) {
 	cfg := a.GetConfig()
-	if cfg.APIKey == "" {
-		return "", fmt.Errorf("API key not set — open Settings to add your Anthropic API key")
-	}
 
 	var messages []Message
 	if err := json.Unmarshal([]byte(conversationJSON), &messages); err != nil {
 		return "", fmt.Errorf("invalid conversation format: %w", err)
 	}
 
-	client := anthropic.NewClient(option.WithAPIKey(cfg.APIKey))
+	if isOpenAIModel(cfg.Model) {
+		return a.sendOpenAI(cfg, messages)
+	}
+	return a.sendAnthropic(cfg, messages)
+}
 
-	// Build Anthropic message params.
+func (a *App) sendAnthropic(cfg Config, messages []Message) (string, error) {
+	if cfg.AnthropicKey == "" {
+		return "", fmt.Errorf("Anthropic API key not set — open Settings to add your key")
+	}
+
+	client := anthropic.NewClient(option.WithAPIKey(cfg.AnthropicKey))
+
 	var apiMessages []anthropic.MessageParam
 	for _, m := range messages {
 		switch m.Role {
@@ -123,23 +141,49 @@ func (a *App) SendMessage(conversationJSON string) (string, error) {
 		MaxTokens: 2048,
 		Messages:  apiMessages,
 		System: []anthropic.TextBlockParam{
-			{Text: "You are a helpful meeting assistant. Be concise and practical."},
+			{Text: "You are a helpful meeting assistant. Be concise and practical. Format responses in markdown when it aids clarity."},
 		},
 	})
 	if err != nil {
-		return "", fmt.Errorf("Claude API error: %w", err)
+		return "", fmt.Errorf("Anthropic API error: %w", err)
 	}
-
-	if len(resp.Content) == 0 {
-		return "", fmt.Errorf("empty response from Claude")
-	}
-
-	// Extract text from the first content block.
 	for _, block := range resp.Content {
 		if block.Type == "text" {
 			return block.Text, nil
 		}
 	}
-
 	return "", fmt.Errorf("no text content in response")
+}
+
+func (a *App) sendOpenAI(cfg Config, messages []Message) (string, error) {
+	if cfg.OpenAIKey == "" {
+		return "", fmt.Errorf("OpenAI API key not set — open Settings to add your key")
+	}
+
+	client := openai.NewClient(cfg.OpenAIKey)
+
+	var msgs []openai.ChatCompletionMessage
+	msgs = append(msgs, openai.ChatCompletionMessage{
+		Role:    openai.ChatMessageRoleSystem,
+		Content: "You are a helpful meeting assistant. Be concise and practical. Format responses in markdown when it aids clarity.",
+	})
+	for _, m := range messages {
+		role := openai.ChatMessageRoleUser
+		if m.Role == "assistant" {
+			role = openai.ChatMessageRoleAssistant
+		}
+		msgs = append(msgs, openai.ChatCompletionMessage{Role: role, Content: m.Content})
+	}
+
+	resp, err := client.CreateChatCompletion(context.Background(), openai.ChatCompletionRequest{
+		Model:    cfg.Model,
+		Messages: msgs,
+	})
+	if err != nil {
+		return "", fmt.Errorf("OpenAI API error: %w", err)
+	}
+	if len(resp.Choices) == 0 {
+		return "", fmt.Errorf("empty response from OpenAI")
+	}
+	return resp.Choices[0].Message.Content, nil
 }

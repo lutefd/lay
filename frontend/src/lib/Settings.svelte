@@ -2,27 +2,24 @@
   import { onMount } from 'svelte';
   import { GetConfig, SaveConfig } from '../../wailsjs/go/main/App.js';
 
-  const MODELS = [
-    { id: 'claude-haiku-4-5-20251001', label: 'Haiku 4.5 (fast)' },
-    { id: 'claude-sonnet-4-6',         label: 'Sonnet 4.6 (recommended)' },
-    { id: 'claude-opus-4-6',           label: 'Opus 4.6 (most capable)' },
-  ];
-
-  let apiKey = $state('');
+  let anthropicKey = $state('');
+  let openaiKey = $state('');
   let model = $state('claude-sonnet-4-6');
   let status = $state<'idle' | 'saving' | 'saved' | 'error'>('idle');
-  let showKey = $state(false);
+  let showAnthropic = $state(false);
+  let showOpenAI = $state(false);
 
   onMount(async () => {
     const cfg = await GetConfig();
-    apiKey = cfg.apiKey ?? '';
+    anthropicKey = cfg.anthropicKey ?? '';
+    openaiKey = cfg.openaiKey ?? '';
     model = cfg.model ?? 'claude-sonnet-4-6';
   });
 
   async function save() {
     status = 'saving';
     try {
-      await SaveConfig(apiKey.trim(), model);
+      await SaveConfig(anthropicKey.trim(), openaiKey.trim(), model);
       status = 'saved';
       setTimeout(() => (status = 'idle'), 2000);
     } catch {
@@ -34,39 +31,53 @@
 <div class="settings-panel">
   <h2>Settings</h2>
 
+  <!-- Anthropic key -->
   <label class="field">
     <span class="field-label">Anthropic API Key</span>
     <div class="key-row">
-      {#if showKey}
-        <input
-          type="text"
-          class="field-input"
-          bind:value={apiKey}
-          placeholder="sk-ant-…"
-          autocomplete="off"
-          spellcheck={false}
-        />
+      {#if showAnthropic}
+        <input type="text"     class="field-input" bind:value={anthropicKey} placeholder="sk-ant-…" autocomplete="off" spellcheck={false} />
       {:else}
-        <input
-          type="password"
-          class="field-input"
-          bind:value={apiKey}
-          placeholder="sk-ant-…"
-          autocomplete="off"
-        />
+        <input type="password" class="field-input" bind:value={anthropicKey} placeholder="sk-ant-…" autocomplete="off" />
       {/if}
-      <button class="toggle-btn" onclick={() => (showKey = !showKey)}>
-        {showKey ? 'hide' : 'show'}
+      <button class="toggle-btn" onclick={() => (showAnthropic = !showAnthropic)}>
+        {showAnthropic ? 'hide' : 'show'}
       </button>
     </div>
   </label>
 
+  <!-- OpenAI key -->
+  <label class="field">
+    <span class="field-label">OpenAI API Key</span>
+    <div class="key-row">
+      {#if showOpenAI}
+        <input type="text"     class="field-input" bind:value={openaiKey} placeholder="sk-proj-…" autocomplete="off" spellcheck={false} />
+      {:else}
+        <input type="password" class="field-input" bind:value={openaiKey} placeholder="sk-proj-…" autocomplete="off" />
+      {/if}
+      <button class="toggle-btn" onclick={() => (showOpenAI = !showOpenAI)}>
+        {showOpenAI ? 'hide' : 'show'}
+      </button>
+    </div>
+  </label>
+
+  <!-- Model -->
   <label class="field">
     <span class="field-label">Model</span>
     <select class="field-select" bind:value={model}>
-      {#each MODELS as m}
-        <option value={m.id}>{m.label}</option>
-      {/each}
+      <optgroup label="Anthropic">
+        <option value="claude-haiku-4-5-20251001">Haiku 4.5 — fast</option>
+        <option value="claude-sonnet-4-6">Sonnet 4.6 — recommended</option>
+        <option value="claude-opus-4-6">Opus 4.6 — most capable</option>
+      </optgroup>
+      <optgroup label="OpenAI">
+        <option value="gpt-4o-mini">GPT-4o mini — fast</option>
+        <option value="gpt-4o">GPT-4o</option>
+        <option value="gpt-4-turbo">GPT-4 Turbo</option>
+        <option value="o1-mini">o1 mini</option>
+        <option value="o1">o1</option>
+        <option value="o3-mini">o3 mini</option>
+      </optgroup>
     </select>
   </label>
 
@@ -81,8 +92,9 @@
   </div>
 
   <p class="hint">
-    Get your API key at <strong>console.anthropic.com</strong>.<br/>
-    Keys are stored only in <code>~/.lay/config.json</code>.
+    Anthropic: <strong>console.anthropic.com</strong><br/>
+    OpenAI: <strong>platform.openai.com/api-keys</strong><br/>
+    Keys stored in <code>~/.lay/config.json</code>.
   </p>
 </div>
 
@@ -92,7 +104,7 @@
     padding: 18px 20px;
     display: flex;
     flex-direction: column;
-    gap: 16px;
+    gap: 14px;
     overflow-y: auto;
   }
 
@@ -108,12 +120,13 @@
   .field {
     display: flex;
     flex-direction: column;
-    gap: 6px;
+    gap: 5px;
   }
 
   .field-label {
-    font-size: 12px;
-    color: rgba(255, 255, 255, 0.5);
+    font-size: 11px;
+    color: rgba(255, 255, 255, 0.45);
+    font-weight: 500;
   }
 
   .key-row {
@@ -129,7 +142,7 @@
     color: rgba(255, 255, 255, 0.87);
     font-family: 'JetBrains Mono', monospace;
     font-size: 12px;
-    padding: 7px 10px;
+    padding: 6px 10px;
     outline: none;
     transition: border-color 0.15s;
   }
@@ -142,12 +155,13 @@
     background: rgba(255, 255, 255, 0.06);
     border: 1px solid rgba(255, 255, 255, 0.1);
     border-radius: 7px;
-    color: rgba(255, 255, 255, 0.5);
+    color: rgba(255, 255, 255, 0.45);
     font-size: 11px;
     font-family: inherit;
     padding: 0 10px;
     cursor: pointer;
     transition: color 0.15s, background 0.15s;
+    flex-shrink: 0;
   }
 
   .toggle-btn:hover {
@@ -162,10 +176,15 @@
     color: rgba(255, 255, 255, 0.87);
     font-family: inherit;
     font-size: 13px;
-    padding: 7px 10px;
+    padding: 6px 10px;
     outline: none;
     cursor: pointer;
     appearance: auto;
+  }
+
+  .field-select :global(optgroup) {
+    color: rgba(255, 255, 255, 0.5);
+    font-size: 11px;
   }
 
   .actions {
@@ -196,9 +215,9 @@
 
   .hint {
     font-size: 11px;
-    color: rgba(255, 255, 255, 0.25);
-    line-height: 1.6;
-    margin: 4px 0 0;
+    color: rgba(255, 255, 255, 0.22);
+    line-height: 1.7;
+    margin: 0;
   }
 
   .hint code {

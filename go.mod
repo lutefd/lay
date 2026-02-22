@@ -4,10 +4,13 @@ go 1.23.0
 
 toolchain go1.24.6
 
-require github.com/wailsapp/wails/v2 v2.11.0
+require (
+	github.com/anthropics/anthropic-sdk-go v1.26.0
+	github.com/sashabaranov/go-openai v1.41.2
+	github.com/wailsapp/wails/v2 v2.11.0
+)
 
 require (
-	github.com/anthropics/anthropic-sdk-go v1.26.0 // indirect
 	github.com/bep/debounce v1.2.1 // indirect
 	github.com/go-ole/go-ole v1.3.0 // indirect
 	github.com/godbus/dbus/v5 v5.1.0 // indirect

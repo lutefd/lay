@@ -8,12 +8,11 @@
   let { activeTab = $bindable('notes') }: Props = $props();
 </script>
 
-<header>
-  <div class="drag-region" style="--wails-draggable: drag">
-    <span class="app-title">lay</span>
-  </div>
+<!-- Entire header is the drag region; buttons opt out with no-drag -->
+<header style="--wails-draggable: drag">
+  <span class="app-title">lay</span>
 
-  <nav>
+  <nav style="--wails-draggable: no-drag">
     <button
       class="tab-btn"
       class:active={activeTab === 'notes'}
@@ -31,7 +30,7 @@
     >Settings</button>
   </nav>
 
-  <div class="window-controls">
+  <div class="window-controls" style="--wails-draggable: no-drag">
     <button class="ctrl-btn" onclick={WindowMinimise} title="Minimise">−</button>
     <button class="ctrl-btn close" onclick={Quit} title="Quit">×</button>
   </div>
@@ -47,13 +46,6 @@
     background: rgba(12, 12, 18, 0.85);
     border-bottom: 1px solid rgba(255, 255, 255, 0.07);
     flex-shrink: 0;
-  }
-
-  .drag-region {
-    display: flex;
-    align-items: center;
-    padding: 0 6px;
-    min-width: 50px;
     cursor: move;
   }
 
@@ -63,6 +55,8 @@
     letter-spacing: 0.06em;
     color: rgba(255, 255, 255, 0.5);
     user-select: none;
+    padding: 0 6px;
+    flex-shrink: 0;
   }
 
   nav {

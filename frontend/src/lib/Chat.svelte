@@ -1,6 +1,7 @@
 <script lang="ts">
   import { tick } from 'svelte';
   import { SendMessage } from '../../wailsjs/go/main/App.js';
+  import Markdown from './Markdown.svelte';
 
   interface ChatMessage {
     role: 'user' | 'assistant';
@@ -52,6 +53,10 @@
     messages = [];
     error = '';
   }
+
+  function copyMessage(content: string) {
+    navigator.clipboard.writeText(content);
+  }
 </script>
 
 <div class="chat-panel">
@@ -68,15 +73,31 @@
 
     {#each messages as msg}
       <div class="message {msg.role}">
-        <span class="role-label">{msg.role === 'user' ? 'you' : 'ai'}</span>
-        <div class="bubble">{msg.content}</div>
+        <div class="msg-header">
+          <span class="role-label">{msg.role === 'user' ? 'you' : 'ai'}</span>
+          {#if msg.role === 'assistant'}
+            <button class="copy-btn" onclick={() => copyMessage(msg.content)} title="Copy raw markdown">
+              copy
+            </button>
+          {/if}
+        </div>
+        {#if msg.role === 'assistant'}
+          <!-- copyRaw=true: Cmd+C anywhere on this bubble gives raw markdown -->
+          <div class="bubble assistant-bubble">
+            <Markdown raw={msg.content} copyRaw={true} />
+          </div>
+        {:else}
+          <div class="bubble user-bubble">{msg.content}</div>
+        {/if}
       </div>
     {/each}
 
     {#if loading}
       <div class="message assistant">
-        <span class="role-label">ai</span>
-        <div class="bubble loading">
+        <div class="msg-header">
+          <span class="role-label">ai</span>
+        </div>
+        <div class="bubble assistant-bubble loading">
           <span class="dot-bounce">●</span>
           <span class="dot-bounce delay1">●</span>
           <span class="dot-bounce delay2">●</span>
@@ -143,7 +164,7 @@
     padding: 8px 12px;
     display: flex;
     flex-direction: column;
-    gap: 12px;
+    gap: 14px;
     scroll-behavior: smooth;
   }
 
@@ -161,7 +182,13 @@
   .message {
     display: flex;
     flex-direction: column;
-    gap: 3px;
+    gap: 4px;
+  }
+
+  .msg-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
   }
 
   .role-label {
@@ -172,23 +199,44 @@
     color: rgba(255, 255, 255, 0.3);
   }
 
-  .message.user .role-label  { color: #7c9ef5aa; }
+  .message.user .role-label   { color: #7c9ef5aa; }
   .message.assistant .role-label { color: #4caf82aa; }
 
+  .copy-btn {
+    background: none;
+    border: none;
+    color: rgba(255, 255, 255, 0.2);
+    font-size: 10px;
+    font-family: inherit;
+    padding: 1px 5px;
+    border-radius: 3px;
+    cursor: pointer;
+    transition: color 0.15s, background 0.15s;
+    margin-left: auto;
+  }
+
+  .copy-btn:hover {
+    color: rgba(255, 255, 255, 0.6);
+    background: rgba(255, 255, 255, 0.06);
+  }
+
   .bubble {
-    background: rgba(255, 255, 255, 0.05);
     border-radius: 8px;
     padding: 8px 12px;
+  }
+
+  .assistant-bubble {
+    background: rgba(255, 255, 255, 0.05);
+  }
+
+  .user-bubble {
+    background: rgba(124, 158, 245, 0.12);
+    align-self: flex-end;
     font-size: 13px;
     line-height: 1.6;
     color: rgba(255, 255, 255, 0.87);
     white-space: pre-wrap;
     word-break: break-word;
-  }
-
-  .message.user .bubble {
-    background: rgba(124, 158, 245, 0.12);
-    align-self: flex-end;
   }
 
   .bubble.loading {
