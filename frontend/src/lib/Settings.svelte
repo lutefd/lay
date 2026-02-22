@@ -71,12 +71,11 @@
         <option value="claude-opus-4-6">Opus 4.6 — most capable</option>
       </optgroup>
       <optgroup label="OpenAI">
-        <option value="gpt-4o-mini">GPT-4o mini — fast</option>
-        <option value="gpt-4o">GPT-4o</option>
-        <option value="gpt-4-turbo">GPT-4 Turbo</option>
-        <option value="o1-mini">o1 mini</option>
-        <option value="o1">o1</option>
-        <option value="o3-mini">o3 mini</option>
+        <option value="gpt-5-nano">GPT-5 nano — fastest</option>
+        <option value="gpt-5-mini">GPT-5 mini — fast</option>
+        <option value="gpt-5.1">GPT-5.1</option>
+        <option value="gpt-5.2">GPT-5.2</option>
+        <option value="gpt-5.2-chat-latest">GPT-5.2 chat latest</option>
       </optgroup>
     </select>
   </label>

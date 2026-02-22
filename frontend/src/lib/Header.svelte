@@ -8,31 +8,34 @@
   let { activeTab = $bindable('notes') }: Props = $props();
 </script>
 
-<!-- Entire header is the drag region; buttons opt out with no-drag -->
+<!-- Entire header is the drag region; only the buttons themselves opt out -->
 <header style="--wails-draggable: drag">
   <span class="app-title">lay</span>
 
-  <nav style="--wails-draggable: no-drag">
+  <nav>
     <button
       class="tab-btn"
       class:active={activeTab === 'notes'}
       onclick={() => (activeTab = 'notes')}
+      style="--wails-draggable: no-drag"
     >Notes</button>
     <button
       class="tab-btn"
       class:active={activeTab === 'chat'}
       onclick={() => (activeTab = 'chat')}
+      style="--wails-draggable: no-drag"
     >Chat</button>
     <button
       class="tab-btn"
       class:active={activeTab === 'settings'}
       onclick={() => (activeTab = 'settings')}
+      style="--wails-draggable: no-drag"
     >Settings</button>
   </nav>
 
-  <div class="window-controls" style="--wails-draggable: no-drag">
-    <button class="ctrl-btn" onclick={WindowMinimise} title="Minimise">−</button>
-    <button class="ctrl-btn close" onclick={Quit} title="Quit">×</button>
+  <div class="window-controls">
+    <button class="ctrl-btn" onclick={WindowMinimise} title="Minimise" style="--wails-draggable: no-drag">−</button>
+    <button class="ctrl-btn close" onclick={Quit} title="Quit" style="--wails-draggable: no-drag">×</button>
   </div>
 </header>
 
