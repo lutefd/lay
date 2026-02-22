@@ -2,10 +2,16 @@
   "$schema": "https://wails.io/schemas/config.v2.json",
   "name": "lay",
   "outputfilename": "lay",
-  "frontend:install": "npm install",
+  "frontend:install": "npm --registry https://registry.npmjs.org install",
   "frontend:build": "npm run build",
   "frontend:dev:watcher": "npm run dev",
   "frontend:dev:serverUrl": "auto",
+  "info": {
+    "productName": "lay",
+    "productVersion": "0.1.0",
+    "copyright": "© 2026 Luis Dourado",
+    "comments": "Meeting assistant overlay — invisible to screen capture"
+  },
   "author": {
     "name": "Luis Dourado",
     "email": "lfaddourado@gmail.com"
