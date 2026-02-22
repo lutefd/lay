@@ -4,19 +4,18 @@ package main
 
 /*
 #cgo CFLAGS: -x objective-c
-#cgo LDFLAGS: -framework Cocoa
+#cgo LDFLAGS: -framework Cocoa -framework Carbon
 
 #import <Cocoa/Cocoa.h>
 #import <dispatch/dispatch.h>
+#include <Carbon/Carbon.h>
 
-static id _globalMonitor = nil;
-static id _localMonitor  = nil;
+static EventHotKeyRef  _hotKeyRef        = NULL;
+static EventHandlerRef _hotKeyHandlerRef = NULL;
 
 // toggleWindow checks the real window state and minimises or restores accordingly.
-// Must be called on the main thread (called inside dispatch_async blocks below).
+// Must be called on the main thread.
 static void toggleWindow() {
-    // Find our content window. mainWindow is nil when the app is hidden,
-    // so fall back to iterating all windows.
     NSWindow *w = [NSApp mainWindow];
     if (!w) {
         for (NSWindow *win in [NSApp windows]) {
@@ -27,18 +26,22 @@ static void toggleWindow() {
     if (!w) return;
 
     if ([w isMiniaturized]) {
-        // Restore from dock
         [w deminiaturize:nil];
         [NSApp activateIgnoringOtherApps:YES];
     } else if (![NSApp isHidden] && [w isVisible]) {
-        // Visible → minimise to dock
         [w miniaturize:nil];
     } else {
-        // Hidden (via NSApp hide) → unhide and bring forward
         [NSApp unhide:nil];
         [NSApp activateIgnoringOtherApps:YES];
         [w makeKeyAndOrderFront:nil];
     }
+}
+
+// hotkeyPressed is the Carbon event handler — fires system-wide regardless of
+// which app is frontmost, without requiring Accessibility permissions.
+static OSStatus hotkeyPressed(EventHandlerCallRef next, EventRef event, void *data) {
+    dispatch_async(dispatch_get_main_queue(), ^{ toggleWindow(); });
+    return noErr;
 }
 
 static void protectAllWindows() {
@@ -49,35 +52,33 @@ static void protectAllWindows() {
     });
 }
 
+// setAccessoryPolicy hides the app from the macOS menu bar and Dock while
+// still allowing it to show floating windows.
+static void setAccessoryPolicy() {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [NSApp setActivationPolicy:NSApplicationActivationPolicyAccessory];
+    });
+}
+
 static void registerGlobalHotkey() {
     dispatch_async(dispatch_get_main_queue(), ^{
-        NSUInteger mask = NSEventModifierFlagCommand | NSEventModifierFlagShift;
+        // Install handler for kEventHotKeyPressed on the application target.
+        EventTypeSpec spec = { kEventClassKeyboard, kEventHotKeyPressed };
+        InstallApplicationEventHandler(hotkeyPressed, 1, &spec, NULL, &_hotKeyHandlerRef);
 
-        // Global monitor: fires when a different app is frontmost.
-        _globalMonitor = [NSEvent addGlobalMonitorForEventsMatchingMask:NSEventMaskKeyDown
-                                                                handler:^(NSEvent *event) {
-            if ((event.modifierFlags & mask) == mask && event.keyCode == 37) {
-                dispatch_async(dispatch_get_main_queue(), ^{ toggleWindow(); });
-            }
-        }];
-
-        // Local monitor: fires when this app is frontmost.
-        // Returns nil to consume the event so it doesn't propagate to the webview.
-        _localMonitor = [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskKeyDown
-                                                              handler:^NSEvent *(NSEvent *event) {
-            if ((event.modifierFlags & mask) == mask && event.keyCode == 37) {
-                dispatch_async(dispatch_get_main_queue(), ^{ toggleWindow(); });
-                return nil;
-            }
-            return event;
-        }];
+        // Register ⌘+Shift+L (kVK_ANSI_L == 37).
+        EventHotKeyID hkID;
+        hkID.signature = 'LAYO';
+        hkID.id = 1;
+        RegisterEventHotKey(kVK_ANSI_L, cmdKey | shiftKey, hkID,
+                            GetApplicationEventTarget(), 0, &_hotKeyRef);
     });
 }
 
 static void unregisterGlobalHotkey() {
     dispatch_sync(dispatch_get_main_queue(), ^{
-        if (_globalMonitor) { [NSEvent removeMonitor:_globalMonitor]; _globalMonitor = nil; }
-        if (_localMonitor)  { [NSEvent removeMonitor:_localMonitor];  _localMonitor  = nil; }
+        if (_hotKeyRef)        { UnregisterEventHotKey(_hotKeyRef);     _hotKeyRef        = NULL; }
+        if (_hotKeyHandlerRef) { RemoveEventHandler(_hotKeyHandlerRef);  _hotKeyHandlerRef = NULL; }
     });
 }
 */
@@ -88,12 +89,17 @@ func ProtectWindow() {
 	C.protectAllWindows()
 }
 
-// RegisterGlobalHotkey installs ⌘+Shift+L monitors (global + local).
+// SetAccessoryPolicy hides lay from the macOS menu bar and Dock.
+func SetAccessoryPolicy() {
+	C.setAccessoryPolicy()
+}
+
+// RegisterGlobalHotkey installs the ⌘+Shift+L Carbon hotkey (system-wide).
 func RegisterGlobalHotkey() {
 	C.registerGlobalHotkey()
 }
 
-// UnregisterGlobalHotkey removes both event monitors.
+// UnregisterGlobalHotkey removes the Carbon hotkey and its event handler.
 func UnregisterGlobalHotkey() {
 	C.unregisterGlobalHotkey()
 }

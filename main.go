@@ -29,6 +29,7 @@ func main() {
 		OnStartup: func(ctx context.Context) {
 			app.startup(ctx)
 			ProtectWindow()
+			SetAccessoryPolicy()
 			RegisterGlobalHotkey()
 		},
 		OnShutdown: func(ctx context.Context) {
