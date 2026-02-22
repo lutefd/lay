@@ -19,6 +19,10 @@ body {
   user-select: none;
 }
 
+:root {
+  --window-radius: 6px;
+}
+
 /* Allow text selection inside inputs and textareas */
 input, textarea, [contenteditable] {
   user-select: text;
@@ -29,7 +33,7 @@ input, textarea, [contenteditable] {
   background: rgba(14, 14, 20, 0.88);
   backdrop-filter: blur(24px);
   -webkit-backdrop-filter: blur(24px);
-  border-radius: 10px;
+  border-radius: var(--window-radius);
   overflow: hidden;
 }
 

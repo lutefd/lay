@@ -29,7 +29,7 @@
     flex-direction: column;
     height: 100vh;
     overflow: hidden;
-    border-radius: 10px;
+    border-radius: var(--window-radius);
     border: 1px solid rgba(255, 255, 255, 0.08);
   }
 
