@@ -10,7 +10,7 @@ package main
 #import <dispatch/dispatch.h>
 #include <Carbon/Carbon.h>
 
-static EventHotKeyRef  _hotKeyRef        = NULL;
+static EventHotKeyRef  _hotKeyRefs[5]    = { NULL };
 static EventHandlerRef _hotKeyHandlerRef = NULL;
 
 // toggleWindow checks the real window state and minimises or restores accordingly.
@@ -37,10 +37,38 @@ static void toggleWindow() {
     }
 }
 
+static void setWindowOpacity(CGFloat value) {
+    NSWindow *w = [NSApp mainWindow];
+    if (!w) {
+        for (NSWindow *win in [NSApp windows]) {
+            w = win;
+            break;
+        }
+    }
+    if (!w) return;
+
+    [w setAlphaValue:value];
+}
+
 // hotkeyPressed is the Carbon event handler — fires system-wide regardless of
 // which app is frontmost, without requiring Accessibility permissions.
 static OSStatus hotkeyPressed(EventHandlerCallRef next, EventRef event, void *data) {
-    dispatch_async(dispatch_get_main_queue(), ^{ toggleWindow(); });
+    EventHotKeyID hkID;
+    if (GetEventParameter(event, kEventParamDirectObject, typeEventHotKeyID, NULL,
+                          sizeof(hkID), NULL, &hkID) != noErr) {
+        return noErr;
+    }
+
+    dispatch_async(dispatch_get_main_queue(), ^{
+        switch (hkID.id) {
+            case 1: toggleWindow(); break;
+            case 2: setWindowOpacity(1.0); break;
+            case 3: setWindowOpacity(0.75); break;
+            case 4: setWindowOpacity(0.5); break;
+            case 5: setWindowOpacity(0.25); break;
+            default: break;
+        }
+    });
     return noErr;
 }
 
@@ -66,18 +94,35 @@ static void registerGlobalHotkey() {
         EventTypeSpec spec = { kEventClassKeyboard, kEventHotKeyPressed };
         InstallApplicationEventHandler(hotkeyPressed, 1, &spec, NULL, &_hotKeyHandlerRef);
 
-        // Register ⌘+Shift+L (kVK_ANSI_L == 37).
         EventHotKeyID hkID;
         hkID.signature = 'LAYO';
+
+        // Toggle window: ⌘+Shift+L (kVK_ANSI_L == 37).
         hkID.id = 1;
         RegisterEventHotKey(kVK_ANSI_L, cmdKey | shiftKey, hkID,
-                            GetApplicationEventTarget(), 0, &_hotKeyRef);
+                            GetApplicationEventTarget(), 0, &_hotKeyRefs[0]);
+
+        // Opacity: ⌘+⌥+1/2/3/4.
+        hkID.id = 2;
+        RegisterEventHotKey(kVK_ANSI_1, cmdKey | optionKey, hkID,
+                            GetApplicationEventTarget(), 0, &_hotKeyRefs[1]);
+        hkID.id = 3;
+        RegisterEventHotKey(kVK_ANSI_2, cmdKey | optionKey, hkID,
+                            GetApplicationEventTarget(), 0, &_hotKeyRefs[2]);
+        hkID.id = 4;
+        RegisterEventHotKey(kVK_ANSI_3, cmdKey | optionKey, hkID,
+                            GetApplicationEventTarget(), 0, &_hotKeyRefs[3]);
+        hkID.id = 5;
+        RegisterEventHotKey(kVK_ANSI_4, cmdKey | optionKey, hkID,
+                            GetApplicationEventTarget(), 0, &_hotKeyRefs[4]);
     });
 }
 
 static void unregisterGlobalHotkey() {
     dispatch_sync(dispatch_get_main_queue(), ^{
-        if (_hotKeyRef)        { UnregisterEventHotKey(_hotKeyRef);     _hotKeyRef        = NULL; }
+        for (int i = 0; i < 5; i++) {
+            if (_hotKeyRefs[i]) { UnregisterEventHotKey(_hotKeyRefs[i]); _hotKeyRefs[i] = NULL; }
+        }
         if (_hotKeyHandlerRef) { RemoveEventHandler(_hotKeyHandlerRef);  _hotKeyHandlerRef = NULL; }
     });
 }
