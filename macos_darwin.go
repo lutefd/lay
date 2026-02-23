@@ -209,22 +209,19 @@ static void unregisterGlobalHotkey() {
 // Audio capture — ScreenCaptureKit (system audio) + AVAudioEngine (mic)
 // ──────────────────────────────────────────────────────────────────────────────
 
-// State shared between startCapture / stopCapture and the SCStream delegate.
-// All mutation happens on the Go caller's thread (start/stop) or the serial
-// _audioWriteQueue (SCStream callbacks), so no extra locking is needed.
 static AVAudioEngine      *_audioEngine    = nil;
 static AVAudioFile        *_micAudioFile   = nil;
 static id                  _scStream       = nil;  // SCStream*
 static id                  _scDelegate     = nil;  // LaySCStreamDelegate*
 static ExtAudioFileRef     _sysExtFile     = NULL;
 static dispatch_queue_t    _audioWriteQ    = nil;
+static char               *_sysFilePath    = NULL; // malloc'd, owned here
+static BOOL                _sysFileReady   = NO;   // file created on first callback
 static BOOL                _isRecording    = NO;
 
-API_AVAILABLE(macos(13.0))
 @interface LaySCStreamDelegate : NSObject <SCStreamOutput, SCStreamDelegate>
 @end
 
-API_AVAILABLE(macos(13.0))
 @implementation LaySCStreamDelegate
 
 - (void)stream:(SCStream *)stream
@@ -232,23 +229,42 @@ API_AVAILABLE(macos(13.0))
     ofType:(SCStreamOutputType)type
 {
     if (type != SCStreamOutputTypeAudio) return;
+
+    // On the first callback we learn the actual format from the buffer itself —
+    // no assumptions about interleaving or sample rate needed.
+    if (!_sysFileReady && _sysFilePath) {
+        CMFormatDescriptionRef fmtDesc = CMSampleBufferGetFormatDescription(sampleBuffer);
+        const AudioStreamBasicDescription *asbd =
+            CMAudioFormatDescriptionGetStreamBasicDescription(fmtDesc);
+        if (asbd) {
+            NSURL *url = [NSURL fileURLWithPath:
+                [NSString stringWithUTF8String:_sysFilePath]];
+            // CAF handles any PCM format natively; no conversion needed.
+            ExtAudioFileCreateWithURL((__bridge CFURLRef)url, kAudioFileCAFType,
+                asbd, NULL, kAudioFileFlags_EraseFile, &_sysExtFile);
+            // Client format = file format — passthrough, no conversion.
+            ExtAudioFileSetProperty(_sysExtFile,
+                kExtAudioFileProperty_ClientDataFormat, sizeof(*asbd), asbd);
+            _sysFileReady = YES;
+        }
+    }
+
     if (!_sysExtFile) return;
 
     CMItemCount numSamples = CMSampleBufferGetNumSamples(sampleBuffer);
     if (numSamples == 0) return;
 
-    // Size the AudioBufferList, then fill it from the sample buffer.
     size_t ablSize = 0;
     CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
         sampleBuffer, &ablSize, NULL, 0, NULL, NULL, 0, NULL);
 
     AudioBufferList *abl = (AudioBufferList *)malloc(ablSize);
     CMBlockBufferRef blockBuf = NULL;
-    OSStatus status = CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
+    OSStatus st = CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
         sampleBuffer, &ablSize, abl, ablSize, NULL, NULL,
         kCMSampleBufferFlag_AudioBufferList_Assure16ByteAlignment, &blockBuf);
 
-    if (status == noErr) {
+    if (st == noErr) {
         ExtAudioFileWrite(_sysExtFile, (UInt32)numSamples, abl);
     }
 
@@ -262,7 +278,6 @@ API_AVAILABLE(macos(13.0))
 
 // startCapture starts both mic and system audio capture into outDir.
 // Returns NULL on success, or a malloc'd C string with the error message.
-// The caller is responsible for free()ing the returned string.
 static const char *startCapture(const char *outDir) {
     if (_isRecording) return NULL;
 
@@ -274,28 +289,23 @@ static const char *startCapture(const char *outDir) {
     AVAudioInputNode *inputNode = [_audioEngine inputNode];
     AVAudioFormat *micFmt = [inputNode outputFormatForBus:0];
 
-    NSURL *micURL = [NSURL fileURLWithPath:[dir stringByAppendingPathComponent:@"mic.wav"]];
-    // Force standard int16 PCM so the file plays in any audio player.
-    NSUInteger channels = micFmt.channelCount > 0 ? micFmt.channelCount : 1;
-    NSDictionary *micWavSettings = @{
-        AVFormatIDKey:               @(kAudioFormatLinearPCM),
-        AVSampleRateKey:             @44100.0,
-        AVNumberOfChannelsKey:       @(channels),
-        AVLinearPCMBitDepthKey:      @16,
-        AVLinearPCMIsBigEndianKey:   @NO,
-        AVLinearPCMIsFloatKey:       @NO,
-        AVLinearPCMIsNonInterleaved: @NO,
-    };
+    // Use native mic format for the CAF file so the processingFormat matches
+    // the tap buffer format exactly — no silent format-mismatch writes.
+    NSURL *micURL = [NSURL fileURLWithPath:
+        [dir stringByAppendingPathComponent:@"mic.caf"]];
     NSError *micErr = nil;
     _micAudioFile = [[AVAudioFile alloc] initForWriting:micURL
-                                               settings:micWavSettings
+                                               settings:micFmt.settings
                                                   error:&micErr];
     if (micErr) {
         _audioEngine = nil;
         return strdup(micErr.localizedDescription.UTF8String);
     }
 
-    [inputNode installTapOnBus:0 bufferSize:4096 format:micFmt
+    // Install tap in the file's processingFormat so AVAudioEngine converts
+    // from the hardware format for us before we write.
+    AVAudioFormat *tapFmt = _micAudioFile.processingFormat;
+    [inputNode installTapOnBus:0 bufferSize:4096 format:tapFmt
                          block:^(AVAudioPCMBuffer *buf, AVAudioTime *when) {
         if (_micAudioFile) {
             [_micAudioFile writeFromBuffer:buf error:nil];
@@ -315,6 +325,13 @@ static const char *startCapture(const char *outDir) {
 
     if (@available(macOS 13.0, *)) {
         _audioWriteQ = dispatch_queue_create("com.lay.audiowrite", DISPATCH_QUEUE_SERIAL);
+
+        // Store the output path; the file is created on the first sample callback
+        // so we use the actual ASBD from the stream instead of guessing.
+        NSString *sysPath = [dir stringByAppendingPathComponent:@"system.caf"];
+        if (_sysFilePath) { free(_sysFilePath); }
+        _sysFilePath  = strdup(sysPath.UTF8String);
+        _sysFileReady = NO;
 
         dispatch_semaphore_t sem = dispatch_semaphore_create(0);
         __block const char *scErr = NULL;
@@ -338,57 +355,18 @@ static const char *startCapture(const char *outDir) {
             cfg.capturesAudio        = YES;
             cfg.sampleRate           = 48000;
             cfg.channelCount         = 2;
-            // excludesCurrentProcessAudio requires macOS 14.2+.
             if (@available(macOS 14.2, *)) {
                 cfg.excludesCurrentProcessAudio = YES;
             }
-            // Minimise video — only audio is needed.
-            cfg.width                       = 2;
-            cfg.height                      = 2;
-            cfg.showsCursor                 = NO;
-            cfg.minimumFrameInterval        = CMTimeMake(1, 1); // 1 fps
-
-            // Open system.wav — int16 stereo 44100 Hz (plays everywhere).
-            // ExtAudioFile converts from the float32 48 kHz that SCStream delivers.
-            NSURL *sysURL = [NSURL fileURLWithPath:
-                [dir stringByAppendingPathComponent:@"system.wav"]];
-
-            AudioStreamBasicDescription fileFormat = {
-                .mSampleRate       = 44100.0,
-                .mFormatID         = kAudioFormatLinearPCM,
-                .mFormatFlags      = kAudioFormatFlagIsSignedInteger | kAudioFormatFlagIsPacked,
-                .mBitsPerChannel   = 16,
-                .mChannelsPerFrame = 2,
-                .mBytesPerFrame    = 4,
-                .mFramesPerPacket  = 1,
-                .mBytesPerPacket   = 4,
-            };
-            OSStatus extErr = ExtAudioFileCreateWithURL(
-                (__bridge CFURLRef)sysURL, kAudioFileWAVEType,
-                &fileFormat, NULL, kAudioFileFlags_EraseFile, &_sysExtFile);
-            if (extErr != noErr) {
-                scErr = strdup("failed to create system.wav");
-                dispatch_semaphore_signal(sem);
-                return;
-            }
-            // Client format: float32 stereo 48 kHz — what ScreenCaptureKit delivers.
-            AudioStreamBasicDescription clientFormat = {
-                .mSampleRate       = 48000.0,
-                .mFormatID         = kAudioFormatLinearPCM,
-                .mFormatFlags      = kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked,
-                .mBitsPerChannel   = 32,
-                .mChannelsPerFrame = 2,
-                .mBytesPerFrame    = 8,
-                .mFramesPerPacket  = 1,
-                .mBytesPerPacket   = 8,
-            };
-            ExtAudioFileSetProperty(_sysExtFile,
-                kExtAudioFileProperty_ClientDataFormat, sizeof(clientFormat), &clientFormat);
+            cfg.width                = 2;
+            cfg.height               = 2;
+            cfg.showsCursor          = NO;
+            cfg.minimumFrameInterval = CMTimeMake(1, 1);
 
             _scDelegate = [[LaySCStreamDelegate alloc] init];
-            _scStream = [[SCStream alloc] initWithFilter:filter
-                                           configuration:cfg
-                                                delegate:_scDelegate];
+            _scStream   = [[SCStream alloc] initWithFilter:filter
+                                             configuration:cfg
+                                                  delegate:_scDelegate];
 
             NSError *addErr = nil;
             [_scStream addStreamOutput:_scDelegate
@@ -397,7 +375,6 @@ static const char *startCapture(const char *outDir) {
                                  error:&addErr];
             if (addErr) {
                 scErr = strdup(addErr.localizedDescription.UTF8String);
-                ExtAudioFileDispose(_sysExtFile); _sysExtFile = NULL;
                 _scStream = nil; _scDelegate = nil;
                 dispatch_semaphore_signal(sem);
                 return;
@@ -406,7 +383,6 @@ static const char *startCapture(const char *outDir) {
             [_scStream startCaptureWithCompletionHandler:^(NSError *startErr) {
                 if (startErr) {
                     scErr = strdup(startErr.localizedDescription.UTF8String);
-                    ExtAudioFileDispose(_sysExtFile); _sysExtFile = NULL;
                     _scStream = nil; _scDelegate = nil;
                 }
                 dispatch_semaphore_signal(sem);
@@ -416,7 +392,6 @@ static const char *startCapture(const char *outDir) {
         dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC));
 
         if (scErr) {
-            // System audio failed — stop mic too and surface the error.
             [[_audioEngine inputNode] removeTapOnBus:0];
             [_audioEngine stop];
             _audioEngine = nil;
@@ -429,18 +404,17 @@ static const char *startCapture(const char *outDir) {
     return NULL;
 }
 
-// stopCapture stops both streams and flushes all audio files to disk.
+// stopCapture stops both streams and flushes audio files to disk.
 static void stopCapture(void) {
     if (!_isRecording) return;
     _isRecording = NO;
 
-    // Stop mic first — tap removal is synchronous.
     if (_audioEngine) {
         [[_audioEngine inputNode] removeTapOnBus:0];
         [_audioEngine stop];
         _audioEngine = nil;
     }
-    _micAudioFile = nil; // release flushes the WAV
+    _micAudioFile = nil; // ARC release flushes the CAF
 
     if (@available(macOS 13.0, *)) {
         if (_scStream) {
@@ -459,7 +433,9 @@ static void stopCapture(void) {
         ExtAudioFileDispose(_sysExtFile);
         _sysExtFile = NULL;
     }
-    _audioWriteQ = nil;
+    if (_sysFilePath) { free(_sysFilePath); _sysFilePath = NULL; }
+    _sysFileReady = NO;
+    _audioWriteQ  = nil;
 }
 */
 import "C"
