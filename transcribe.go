@@ -7,6 +7,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -46,22 +48,25 @@ func (a *App) StopRecording() error {
 	return nil
 }
 
-// Transcribe processes the final partial chunk, assembles the full transcript,
-// saves it, and returns the text.
+// Transcribe runs whisper separately on mic.caf and system.caf, then merges
+// the results by timestamp, saves the transcript, and returns the text.
 func (a *App) Transcribe(recordingDir string) (string, error) {
-	a.liveMu.Lock()
-	finalSeq := a.liveChunkSeq
-	a.liveMu.Unlock()
-
-	finalChunk := filepath.Join(recordingDir, fmt.Sprintf("chunk-%d.caf", finalSeq))
-	if _, err := os.Stat(finalChunk); err == nil {
-		a.processChunk(finalChunk)
+	whisperBin, err := findWhisper()
+	if err != nil {
+		return "", err
+	}
+	modelPath, err := findModel()
+	if err != nil {
+		return "", err
 	}
 
-	a.liveMu.Lock()
-	transcript := strings.Join(a.liveSegments, "\n")
-	a.liveMu.Unlock()
+	micPath := filepath.Join(recordingDir, "mic.caf")
+	sysPath := filepath.Join(recordingDir, "system.caf")
 
+	transcript, err := transcribeDual(whisperBin, modelPath, micPath, sysPath)
+	if err != nil {
+		return "", err
+	}
 	if transcript == "" {
 		return "", fmt.Errorf("no transcript produced — check whisper setup and audio")
 	}
@@ -75,8 +80,8 @@ func (a *App) Transcribe(recordingDir string) (string, error) {
 	return transcript, nil
 }
 
-// liveTranscribeLoop rotates the live chunk every liveChunkInterval, converts
-// and runs whisper on each completed chunk, and emits segments via Wails events.
+// liveTranscribeLoop rotates the live mic chunk every liveChunkInterval,
+// converts each completed chunk and runs whisper for the live preview.
 func (a *App) liveTranscribeLoop(ctx context.Context, dir string) {
 	ticker := time.NewTicker(liveChunkInterval)
 	defer ticker.Stop()
@@ -91,19 +96,20 @@ func (a *App) liveTranscribeLoop(ctx context.Context, dir string) {
 			a.liveChunkSeq++
 			a.liveMu.Unlock()
 
-			newChunk := filepath.Join(dir, fmt.Sprintf("chunk-%d.caf", seq+1))
-			if err := RotateChunk(newChunk); err != nil {
+			newMic := filepath.Join(dir, fmt.Sprintf("chunk-%d.caf", seq+1))
+			if err := RotateChunk(newMic); err != nil {
 				continue
 			}
-			oldChunk := filepath.Join(dir, fmt.Sprintf("chunk-%d.caf", seq))
-			a.processChunk(oldChunk)
+			oldMic := filepath.Join(dir, fmt.Sprintf("chunk-%d.caf", seq))
+			go a.processChunk(oldMic)
 		}
 	}
 }
 
-// processChunk converts a .caf chunk to WAV, runs whisper on it, appends the
-// result to liveSegments, and emits a "transcribe:segment" event.
-func (a *App) processChunk(cafPath string) {
+// processChunk transcribes mic and system audio chunks separately, merges
+// them by timestamp, and emits the result for the live preview.
+// The sys chunk path is derived by convention: chunk-N.caf → chunk-sys-N.caf.
+func (a *App) processChunk(micCaf string) {
 	whisperBin, err := findWhisper()
 	if err != nil {
 		return
@@ -113,22 +119,17 @@ func (a *App) processChunk(cafPath string) {
 		return
 	}
 
-	wavPath := cafPath + ".wav"
-	if err := afconvert(cafPath, wavPath); err != nil {
-		os.Remove(cafPath)
-		return
-	}
+	sysCaf := filepath.Join(
+		filepath.Dir(micCaf),
+		strings.Replace(filepath.Base(micCaf), "chunk-", "chunk-sys-", 1),
+	)
 
-	text, err := runWhisper(whisperBin, modelPath, wavPath)
-	os.Remove(cafPath)
-	os.Remove(wavPath)
+	text, err := transcribeDual(whisperBin, modelPath, micCaf, sysCaf)
+	os.Remove(micCaf)
+	os.Remove(sysCaf)
 	if err != nil || text == "" {
 		return
 	}
-
-	a.liveMu.Lock()
-	a.liveSegments = append(a.liveSegments, text)
-	a.liveMu.Unlock()
 
 	runtime.EventsEmit(a.ctx, "transcribe:segment", text)
 }
@@ -150,20 +151,99 @@ func (a *App) AppendTranscriptToNotes(recordingDir string) error {
 	}
 	defer f.Close()
 
-	_, err = fmt.Fprintf(f, "\n\n## Transcript — %s\n\n%s\n", session, stripTimestamps(string(data)))
+	_, err = fmt.Fprintf(f, "\n\n## Transcript — %s\n\n%s\n", session, string(data))
 	return err
 }
 
-// afconvert resamples src to 16 kHz mono signed-int16 WAV using the macOS
-// built-in afconvert tool (no external dependencies required).
-func afconvert(src, dst string) error {
-	out, err := exec.Command(
-		"afconvert", "-f", "WAVE", "-d", "LEI16@16000", "-c", "1", src, dst,
-	).CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("%w: %s", err, strings.TrimSpace(string(out)))
+// transcribeDual converts micCaf and sysCaf to WAV separately, runs whisper
+// on each, merges the results chronologically, and returns clean text.
+// System audio is optional — mic-only output is returned when sysCaf is absent.
+func transcribeDual(whisperBin, modelPath, micCaf, sysCaf string) (string, error) {
+	micWav := micCaf + ".wav"
+	if err := afconvert(micCaf, micWav); err != nil {
+		return "", fmt.Errorf("afconvert mic: %w", err)
 	}
-	return nil
+	defer os.Remove(micWav)
+
+	micRaw, err := runWhisper(whisperBin, modelPath, micWav)
+	if err != nil {
+		return "", fmt.Errorf("whisper mic: %w", err)
+	}
+
+	var sysRaw string
+	if _, err := os.Stat(sysCaf); err == nil {
+		sysWav := sysCaf + ".wav"
+		if err := afconvert(sysCaf, sysWav); err == nil {
+			defer os.Remove(sysWav)
+			sysRaw, _ = runWhisper(whisperBin, modelPath, sysWav)
+		}
+	}
+
+	return mergeTranscripts(micRaw, sysRaw), nil
+}
+
+type tsSegment struct {
+	start float64
+	text  string
+	label string // "you" or "them"
+}
+
+func parseSegments(raw, label string) []tsSegment {
+	var segs []tsSegment
+	for _, line := range strings.Split(raw, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "[") {
+			continue
+		}
+		idx := strings.Index(line, "]")
+		if idx < 0 {
+			continue
+		}
+		meta := line[1:idx] // "00:00:01.000 --> 00:00:04.000"
+		text := strings.TrimSpace(line[idx+1:])
+		if text == "" {
+			continue
+		}
+		parts := strings.SplitN(meta, " --> ", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		start := parseWhisperTS(strings.TrimSpace(parts[0]))
+		if start < 0 {
+			continue
+		}
+		segs = append(segs, tsSegment{start: start, text: text, label: label})
+	}
+	return segs
+}
+
+// mergeTranscripts interleaves mic and system whisper output by timestamp.
+// Mic segments are prefixed with "[You]" so speakers are distinguishable.
+func mergeTranscripts(micRaw, sysRaw string) string {
+	segs := parseSegments(micRaw, "you")
+	segs = append(segs, parseSegments(sysRaw, "them")...)
+	sort.Slice(segs, func(i, j int) bool {
+		return segs[i].start < segs[j].start
+	})
+	var sb strings.Builder
+	for _, s := range segs {
+		if s.label == "you" {
+			sb.WriteString("[You] ")
+		} else {
+			sb.WriteString("[Them] ")
+		}
+		sb.WriteString(s.text)
+		sb.WriteByte('\n')
+	}
+	return strings.TrimSpace(sb.String())
+}
+
+// afconvert converts src (any CoreAudio-readable format) to a 16 kHz mono
+// little-endian int16 WAV at dst using the system afconvert utility.
+func afconvert(src, dst string) error {
+	cmd := exec.Command("afconvert", "-f", "WAVE", "-d", "LEI16@16000", "-c", "1", src, dst)
+	cmd.Stderr = io.Discard
+	return cmd.Run()
 }
 
 // findWhisper locates the whisper-cli binary: app bundle → ~/.lay/ → $PATH.
@@ -228,18 +308,6 @@ func saveTranscript(recordingDir, transcript string) error {
 	return os.WriteFile(filepath.Join(dir, session+".md"), []byte(content), 0o644)
 }
 
-// stripTimestamps removes whisper's [HH:MM:SS.mmm --> HH:MM:SS.mmm] prefixes.
-func stripTimestamps(s string) string {
-	var lines []string
-	for _, line := range strings.Split(s, "\n") {
-		if idx := strings.Index(line, "]"); idx >= 0 && strings.HasPrefix(strings.TrimSpace(line), "[") {
-			line = strings.TrimSpace(line[idx+1:])
-		}
-		lines = append(lines, line)
-	}
-	return strings.Join(lines, "\n")
-}
-
 func recordingsDir() (string, error) {
 	ts := time.Now().Format("2006-01-02-15-04-05")
 	dir := filepath.Join(layDir(), "recordings", ts)
@@ -247,4 +315,24 @@ func recordingsDir() (string, error) {
 		return "", err
 	}
 	return dir, nil
+}
+
+func parseWhisperTS(s string) float64 {
+	s = strings.TrimSpace(s)
+	parts := strings.SplitN(s, ":", 3)
+	if len(parts) != 3 {
+		return -1
+	}
+	h, e1 := strconv.Atoi(parts[0])
+	m, e2 := strconv.Atoi(parts[1])
+	secParts := strings.SplitN(parts[2], ".", 2)
+	if len(secParts) != 2 || e1 != nil || e2 != nil {
+		return -1
+	}
+	sec, e3 := strconv.Atoi(secParts[0])
+	ms, e4 := strconv.Atoi(secParts[1])
+	if e3 != nil || e4 != nil {
+		return -1
+	}
+	return float64(h*3600+m*60+sec) + float64(ms)/1000.0
 }
