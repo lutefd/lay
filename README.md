@@ -14,6 +14,7 @@ Always-on-top meeting assistant built with Wails and Svelte. It stays off screen
 - Opacity 75%: `Cmd+Option+2`
 - Opacity 50%: `Cmd+Option+3`
 - Opacity 25%: `Cmd+Option+4`
+- Move window (focused): `Cmd+Shift+Arrow` (left/right/up/down)
 
 **Data & Config**
 - Notes: `~/.lay/notes.md`
