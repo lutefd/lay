@@ -36,6 +36,7 @@ func main() {
 			ProtectWindow()
 			SetAccessoryPolicy()
 			RegisterGlobalHotkey()
+			RegisterLocalKeyMonitor()
 			go func() {
 				time.Sleep(75 * time.Millisecond)
 				positionWindowTopRight(ctx)
@@ -43,6 +44,7 @@ func main() {
 		},
 		OnShutdown: func(ctx context.Context) {
 			UnregisterGlobalHotkey()
+			UnregisterLocalKeyMonitor()
 		},
 		Bind: []interface{}{
 			app,

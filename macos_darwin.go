@@ -12,6 +12,7 @@ package main
 
 static EventHotKeyRef  _hotKeyRefs[5]    = { NULL };
 static EventHandlerRef _hotKeyHandlerRef = NULL;
+static id _localKeyMonitor = nil;
 
 // toggleWindow checks the real window state and minimises or restores accordingly.
 // Must be called on the main thread.
@@ -48,6 +49,45 @@ static void setWindowOpacity(CGFloat value) {
     if (!w) return;
 
     [w setAlphaValue:value];
+}
+
+static void moveWindowEdge(NSString *direction) {
+    NSWindow *w = [NSApp mainWindow];
+    if (!w) {
+        for (NSWindow *win in [NSApp windows]) {
+            w = win;
+            break;
+        }
+    }
+    if (!w) return;
+
+    NSScreen *screen = [w screen];
+    if (!screen) {
+        screen = [NSScreen mainScreen];
+    }
+    if (!screen) return;
+
+    const CGFloat margin = 12.0;
+    NSRect visible = [screen visibleFrame];
+    NSRect frame = [w frame];
+
+    CGFloat x = frame.origin.x;
+    CGFloat y = frame.origin.y;
+
+    if ([direction isEqualToString:@"left"]) {
+        x = NSMinX(visible) + margin;
+    } else if ([direction isEqualToString:@"right"]) {
+        x = NSMaxX(visible) - frame.size.width - margin;
+    } else if ([direction isEqualToString:@"up"]) {
+        y = NSMaxY(visible) - frame.size.height - margin;
+    } else if ([direction isEqualToString:@"down"]) {
+        y = NSMinY(visible) + margin;
+    }
+
+    if (x < NSMinX(visible)) x = NSMinX(visible);
+    if (y < NSMinY(visible)) y = NSMinY(visible);
+
+    [w setFrameOrigin:NSMakePoint(x, y)];
 }
 
 // hotkeyPressed is the Carbon event handler — fires system-wide regardless of
@@ -118,6 +158,40 @@ static void registerGlobalHotkey() {
     });
 }
 
+static void registerLocalKeyMonitor() {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (_localKeyMonitor) return;
+        _localKeyMonitor = [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskKeyDown handler:^NSEvent * (NSEvent *event) {
+            if (!([event modifierFlags] & NSEventModifierFlagCommand)) {
+                return event;
+            }
+            if (!([event modifierFlags] & NSEventModifierFlagShift)) {
+                return event;
+            }
+            if ([event modifierFlags] & (NSEventModifierFlagOption | NSEventModifierFlagControl)) {
+                return event;
+            }
+
+            switch ([event keyCode]) {
+                case 123: moveWindowEdge(@"left"); return nil;  // Left arrow
+                case 124: moveWindowEdge(@"right"); return nil; // Right arrow
+                case 125: moveWindowEdge(@"down"); return nil;  // Down arrow
+                case 126: moveWindowEdge(@"up"); return nil;    // Up arrow
+                default: return event;
+            }
+        }];
+    });
+}
+
+static void unregisterLocalKeyMonitor() {
+    dispatch_sync(dispatch_get_main_queue(), ^{
+        if (_localKeyMonitor) {
+            [NSEvent removeMonitor:_localKeyMonitor];
+            _localKeyMonitor = nil;
+        }
+    });
+}
+
 static void unregisterGlobalHotkey() {
     dispatch_sync(dispatch_get_main_queue(), ^{
         for (int i = 0; i < 5; i++) {
@@ -144,7 +218,17 @@ func RegisterGlobalHotkey() {
 	C.registerGlobalHotkey()
 }
 
+// RegisterLocalKeyMonitor installs focused-only ⌘+Arrow shortcuts for window positioning.
+func RegisterLocalKeyMonitor() {
+	C.registerLocalKeyMonitor()
+}
+
 // UnregisterGlobalHotkey removes the Carbon hotkey and its event handler.
 func UnregisterGlobalHotkey() {
 	C.unregisterGlobalHotkey()
+}
+
+// UnregisterLocalKeyMonitor removes the focused-only key monitor.
+func UnregisterLocalKeyMonitor() {
+	C.unregisterLocalKeyMonitor()
 }
