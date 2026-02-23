@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
 
 	anthropic "github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
@@ -36,31 +35,6 @@ func NewApp() *App {
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
 	_ = os.MkdirAll(layDir(), 0o755)
-}
-
-func (a *App) StartRecording() (string, error) {
-	dir, err := recordingsDir()
-	if err != nil {
-		return "", err
-	}
-	if err := StartCapture(dir); err != nil {
-		return "", err
-	}
-	return dir, nil
-}
-
-func (a *App) StopRecording() error {
-	StopCapture()
-	return nil
-}
-
-func recordingsDir() (string, error) {
-	ts := time.Now().Format("2006-01-02-15-04-05")
-	dir := filepath.Join(layDir(), "recordings", ts)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return "", err
-	}
-	return dir, nil
 }
 
 func layDir() string {
