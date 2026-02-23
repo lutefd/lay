@@ -275,9 +275,20 @@ static const char *startCapture(const char *outDir) {
     AVAudioFormat *micFmt = [inputNode outputFormatForBus:0];
 
     NSURL *micURL = [NSURL fileURLWithPath:[dir stringByAppendingPathComponent:@"mic.wav"]];
+    // Force standard int16 PCM so the file plays in any audio player.
+    NSUInteger channels = micFmt.channelCount > 0 ? micFmt.channelCount : 1;
+    NSDictionary *micWavSettings = @{
+        AVFormatIDKey:               @(kAudioFormatLinearPCM),
+        AVSampleRateKey:             @44100.0,
+        AVNumberOfChannelsKey:       @(channels),
+        AVLinearPCMBitDepthKey:      @16,
+        AVLinearPCMIsBigEndianKey:   @NO,
+        AVLinearPCMIsFloatKey:       @NO,
+        AVLinearPCMIsNonInterleaved: @NO,
+    };
     NSError *micErr = nil;
     _micAudioFile = [[AVAudioFile alloc] initForWriting:micURL
-                                               settings:micFmt.settings
+                                               settings:micWavSettings
                                                   error:&micErr];
     if (micErr) {
         _audioEngine = nil;
@@ -324,20 +335,44 @@ static const char *startCapture(const char *outDir) {
                 [[SCContentFilter alloc] initWithDisplay:display excludingWindows:@[]];
 
             SCStreamConfiguration *cfg = [[SCStreamConfiguration alloc] init];
-            cfg.capturesAudio               = YES;
-            cfg.excludesCurrentProcessAudio = YES;
-            cfg.sampleRate                  = 48000;
-            cfg.channelCount                = 2;
+            cfg.capturesAudio        = YES;
+            cfg.sampleRate           = 48000;
+            cfg.channelCount         = 2;
+            // excludesCurrentProcessAudio requires macOS 14.2+.
+            if (@available(macOS 14.2, *)) {
+                cfg.excludesCurrentProcessAudio = YES;
+            }
             // Minimise video — only audio is needed.
             cfg.width                       = 2;
             cfg.height                      = 2;
             cfg.showsCursor                 = NO;
             cfg.minimumFrameInterval        = CMTimeMake(1, 1); // 1 fps
 
-            // Open system.wav via ExtAudioFile (float32 stereo 48 kHz).
+            // Open system.wav — int16 stereo 44100 Hz (plays everywhere).
+            // ExtAudioFile converts from the float32 48 kHz that SCStream delivers.
             NSURL *sysURL = [NSURL fileURLWithPath:
                 [dir stringByAppendingPathComponent:@"system.wav"]];
-            AudioStreamBasicDescription fmt = {
+
+            AudioStreamBasicDescription fileFormat = {
+                .mSampleRate       = 44100.0,
+                .mFormatID         = kAudioFormatLinearPCM,
+                .mFormatFlags      = kAudioFormatFlagIsSignedInteger | kAudioFormatFlagIsPacked,
+                .mBitsPerChannel   = 16,
+                .mChannelsPerFrame = 2,
+                .mBytesPerFrame    = 4,
+                .mFramesPerPacket  = 1,
+                .mBytesPerPacket   = 4,
+            };
+            OSStatus extErr = ExtAudioFileCreateWithURL(
+                (__bridge CFURLRef)sysURL, kAudioFileWAVEType,
+                &fileFormat, NULL, kAudioFileFlags_EraseFile, &_sysExtFile);
+            if (extErr != noErr) {
+                scErr = strdup("failed to create system.wav");
+                dispatch_semaphore_signal(sem);
+                return;
+            }
+            // Client format: float32 stereo 48 kHz — what ScreenCaptureKit delivers.
+            AudioStreamBasicDescription clientFormat = {
                 .mSampleRate       = 48000.0,
                 .mFormatID         = kAudioFormatLinearPCM,
                 .mFormatFlags      = kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked,
@@ -347,16 +382,8 @@ static const char *startCapture(const char *outDir) {
                 .mFramesPerPacket  = 1,
                 .mBytesPerPacket   = 8,
             };
-            OSStatus extErr = ExtAudioFileCreateWithURL(
-                (__bridge CFURLRef)sysURL, kAudioFileWAVEType,
-                &fmt, NULL, kAudioFileFlags_EraseFile, &_sysExtFile);
-            if (extErr != noErr) {
-                scErr = strdup("failed to create system.wav");
-                dispatch_semaphore_signal(sem);
-                return;
-            }
             ExtAudioFileSetProperty(_sysExtFile,
-                kExtAudioFileProperty_ClientDataFormat, sizeof(fmt), &fmt);
+                kExtAudioFileProperty_ClientDataFormat, sizeof(clientFormat), &clientFormat);
 
             _scDelegate = [[LaySCStreamDelegate alloc] init];
             _scStream = [[SCStream alloc] initWithFilter:filter
