@@ -21,3 +21,11 @@ export function SaveNotes(arg1) {
 export function SendMessage(arg1) {
   return window['go']['main']['App']['SendMessage'](arg1);
 }
+
+export function StartRecording() {
+  return window['go']['main']['App']['StartRecording']();
+}
+
+export function StopRecording() {
+  return window['go']['main']['App']['StopRecording']();
+}

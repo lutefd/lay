@@ -4,11 +4,15 @@ package main
 
 /*
 #cgo CFLAGS: -x objective-c
-#cgo LDFLAGS: -framework Cocoa -framework Carbon
+#cgo LDFLAGS: -framework Cocoa -framework Carbon -framework ScreenCaptureKit -framework AVFoundation -framework CoreMedia -framework AudioToolbox
 
 #import <Cocoa/Cocoa.h>
 #import <dispatch/dispatch.h>
 #include <Carbon/Carbon.h>
+#import <AVFoundation/AVFoundation.h>
+#import <AudioToolbox/AudioToolbox.h>
+#import <CoreMedia/CoreMedia.h>
+#import <ScreenCaptureKit/ScreenCaptureKit.h>
 
 static EventHotKeyRef  _hotKeyRefs[5]    = { NULL };
 static EventHandlerRef _hotKeyHandlerRef = NULL;
@@ -200,8 +204,242 @@ static void unregisterGlobalHotkey() {
         if (_hotKeyHandlerRef) { RemoveEventHandler(_hotKeyHandlerRef);  _hotKeyHandlerRef = NULL; }
     });
 }
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Audio capture — ScreenCaptureKit (system audio) + AVAudioEngine (mic)
+// ──────────────────────────────────────────────────────────────────────────────
+
+// State shared between startCapture / stopCapture and the SCStream delegate.
+// All mutation happens on the Go caller's thread (start/stop) or the serial
+// _audioWriteQueue (SCStream callbacks), so no extra locking is needed.
+static AVAudioEngine      *_audioEngine    = nil;
+static AVAudioFile        *_micAudioFile   = nil;
+static id                  _scStream       = nil;  // SCStream*
+static id                  _scDelegate     = nil;  // LaySCStreamDelegate*
+static ExtAudioFileRef     _sysExtFile     = NULL;
+static dispatch_queue_t    _audioWriteQ    = nil;
+static BOOL                _isRecording    = NO;
+
+API_AVAILABLE(macos(13.0))
+@interface LaySCStreamDelegate : NSObject <SCStreamOutput, SCStreamDelegate>
+@end
+
+API_AVAILABLE(macos(13.0))
+@implementation LaySCStreamDelegate
+
+- (void)stream:(SCStream *)stream
+    didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
+    ofType:(SCStreamOutputType)type
+{
+    if (type != SCStreamOutputTypeAudio) return;
+    if (!_sysExtFile) return;
+
+    CMItemCount numSamples = CMSampleBufferGetNumSamples(sampleBuffer);
+    if (numSamples == 0) return;
+
+    // Size the AudioBufferList, then fill it from the sample buffer.
+    size_t ablSize = 0;
+    CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
+        sampleBuffer, &ablSize, NULL, 0, NULL, NULL, 0, NULL);
+
+    AudioBufferList *abl = (AudioBufferList *)malloc(ablSize);
+    CMBlockBufferRef blockBuf = NULL;
+    OSStatus status = CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
+        sampleBuffer, &ablSize, abl, ablSize, NULL, NULL,
+        kCMSampleBufferFlag_AudioBufferList_Assure16ByteAlignment, &blockBuf);
+
+    if (status == noErr) {
+        ExtAudioFileWrite(_sysExtFile, (UInt32)numSamples, abl);
+    }
+
+    free(abl);
+    if (blockBuf) CFRelease(blockBuf);
+}
+
+- (void)stream:(SCStream *)stream didStopWithError:(NSError *)error {}
+
+@end
+
+// startCapture starts both mic and system audio capture into outDir.
+// Returns NULL on success, or a malloc'd C string with the error message.
+// The caller is responsible for free()ing the returned string.
+static const char *startCapture(const char *outDir) {
+    if (_isRecording) return NULL;
+
+    NSString *dir = [NSString stringWithUTF8String:outDir];
+
+    // ── Microphone via AVAudioEngine ─────────────────────────────────────────
+
+    _audioEngine = [[AVAudioEngine alloc] init];
+    AVAudioInputNode *inputNode = [_audioEngine inputNode];
+    AVAudioFormat *micFmt = [inputNode outputFormatForBus:0];
+
+    NSURL *micURL = [NSURL fileURLWithPath:[dir stringByAppendingPathComponent:@"mic.wav"]];
+    NSError *micErr = nil;
+    _micAudioFile = [[AVAudioFile alloc] initForWriting:micURL
+                                               settings:micFmt.settings
+                                                  error:&micErr];
+    if (micErr) {
+        _audioEngine = nil;
+        return strdup(micErr.localizedDescription.UTF8String);
+    }
+
+    [inputNode installTapOnBus:0 bufferSize:4096 format:micFmt
+                         block:^(AVAudioPCMBuffer *buf, AVAudioTime *when) {
+        if (_micAudioFile) {
+            [_micAudioFile writeFromBuffer:buf error:nil];
+        }
+    }];
+
+    NSError *engErr = nil;
+    [_audioEngine startAndReturnError:&engErr];
+    if (engErr) {
+        [inputNode removeTapOnBus:0];
+        _audioEngine = nil;
+        _micAudioFile = nil;
+        return strdup(engErr.localizedDescription.UTF8String);
+    }
+
+    // ── System audio via ScreenCaptureKit (macOS 13+) ────────────────────────
+
+    if (@available(macOS 13.0, *)) {
+        _audioWriteQ = dispatch_queue_create("com.lay.audiowrite", DISPATCH_QUEUE_SERIAL);
+
+        dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+        __block const char *scErr = NULL;
+
+        [SCShareableContent getShareableContentWithCompletionHandler:^(
+            SCShareableContent *content, NSError *error)
+        {
+            if (error || content.displays.count == 0) {
+                scErr = error
+                    ? strdup(error.localizedDescription.UTF8String)
+                    : strdup("no displays found for system audio capture");
+                dispatch_semaphore_signal(sem);
+                return;
+            }
+
+            SCDisplay *display = content.displays[0];
+            SCContentFilter *filter =
+                [[SCContentFilter alloc] initWithDisplay:display excludingWindows:@[]];
+
+            SCStreamConfiguration *cfg = [[SCStreamConfiguration alloc] init];
+            cfg.capturesAudio               = YES;
+            cfg.excludesCurrentProcessAudio = YES;
+            cfg.sampleRate                  = 48000;
+            cfg.channelCount                = 2;
+            // Minimise video — only audio is needed.
+            cfg.width                       = 2;
+            cfg.height                      = 2;
+            cfg.showsCursor                 = NO;
+            cfg.minimumFrameInterval        = CMTimeMake(1, 1); // 1 fps
+
+            // Open system.wav via ExtAudioFile (float32 stereo 48 kHz).
+            NSURL *sysURL = [NSURL fileURLWithPath:
+                [dir stringByAppendingPathComponent:@"system.wav"]];
+            AudioStreamBasicDescription fmt = {
+                .mSampleRate       = 48000.0,
+                .mFormatID         = kAudioFormatLinearPCM,
+                .mFormatFlags      = kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked,
+                .mBitsPerChannel   = 32,
+                .mChannelsPerFrame = 2,
+                .mBytesPerFrame    = 8,
+                .mFramesPerPacket  = 1,
+                .mBytesPerPacket   = 8,
+            };
+            OSStatus extErr = ExtAudioFileCreateWithURL(
+                (__bridge CFURLRef)sysURL, kAudioFileWAVEType,
+                &fmt, NULL, kAudioFileFlags_EraseFile, &_sysExtFile);
+            if (extErr != noErr) {
+                scErr = strdup("failed to create system.wav");
+                dispatch_semaphore_signal(sem);
+                return;
+            }
+            ExtAudioFileSetProperty(_sysExtFile,
+                kExtAudioFileProperty_ClientDataFormat, sizeof(fmt), &fmt);
+
+            _scDelegate = [[LaySCStreamDelegate alloc] init];
+            _scStream = [[SCStream alloc] initWithFilter:filter
+                                           configuration:cfg
+                                                delegate:_scDelegate];
+
+            NSError *addErr = nil;
+            [_scStream addStreamOutput:_scDelegate
+                                  type:SCStreamOutputTypeAudio
+                    sampleHandlerQueue:_audioWriteQ
+                                 error:&addErr];
+            if (addErr) {
+                scErr = strdup(addErr.localizedDescription.UTF8String);
+                ExtAudioFileDispose(_sysExtFile); _sysExtFile = NULL;
+                _scStream = nil; _scDelegate = nil;
+                dispatch_semaphore_signal(sem);
+                return;
+            }
+
+            [_scStream startCaptureWithCompletionHandler:^(NSError *startErr) {
+                if (startErr) {
+                    scErr = strdup(startErr.localizedDescription.UTF8String);
+                    ExtAudioFileDispose(_sysExtFile); _sysExtFile = NULL;
+                    _scStream = nil; _scDelegate = nil;
+                }
+                dispatch_semaphore_signal(sem);
+            }];
+        }];
+
+        dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC));
+
+        if (scErr) {
+            // System audio failed — stop mic too and surface the error.
+            [[_audioEngine inputNode] removeTapOnBus:0];
+            [_audioEngine stop];
+            _audioEngine = nil;
+            _micAudioFile = nil;
+            return scErr;
+        }
+    }
+
+    _isRecording = YES;
+    return NULL;
+}
+
+// stopCapture stops both streams and flushes all audio files to disk.
+static void stopCapture(void) {
+    if (!_isRecording) return;
+    _isRecording = NO;
+
+    // Stop mic first — tap removal is synchronous.
+    if (_audioEngine) {
+        [[_audioEngine inputNode] removeTapOnBus:0];
+        [_audioEngine stop];
+        _audioEngine = nil;
+    }
+    _micAudioFile = nil; // release flushes the WAV
+
+    if (@available(macOS 13.0, *)) {
+        if (_scStream) {
+            dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+            [_scStream stopCaptureWithCompletionHandler:^(NSError *err) {
+                dispatch_semaphore_signal(sem);
+            }];
+            dispatch_semaphore_wait(sem,
+                dispatch_time(DISPATCH_TIME_NOW, 3 * NSEC_PER_SEC));
+            _scStream = nil;
+            _scDelegate = nil;
+        }
+    }
+
+    if (_sysExtFile) {
+        ExtAudioFileDispose(_sysExtFile);
+        _sysExtFile = NULL;
+    }
+    _audioWriteQ = nil;
+}
 */
 import "C"
+import (
+	"errors"
+	"unsafe"
+)
 
 // ProtectWindow makes the overlay invisible to screen capture.
 func ProtectWindow() {
@@ -231,4 +469,22 @@ func UnregisterGlobalHotkey() {
 // UnregisterLocalKeyMonitor removes the focused-only key monitor.
 func UnregisterLocalKeyMonitor() {
 	C.unregisterLocalKeyMonitor()
+}
+
+// StartCapture begins mic + system audio capture, writing WAV files into dir.
+func StartCapture(dir string) error {
+	cs := C.CString(dir)
+	defer C.free(unsafe.Pointer(cs))
+	errStr := C.startCapture(cs)
+	if errStr != nil {
+		msg := C.GoString(errStr)
+		C.free(unsafe.Pointer(errStr))
+		return errors.New(msg)
+	}
+	return nil
+}
+
+// StopCapture stops any active capture and flushes audio to disk.
+func StopCapture() {
+	C.stopCapture()
 }

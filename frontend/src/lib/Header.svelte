@@ -2,7 +2,7 @@
   import { WindowMinimise, Quit } from '../../wailsjs/runtime/runtime.js';
 
   interface Props {
-    activeTab: 'notes' | 'chat' | 'settings';
+    activeTab: 'notes' | 'chat' | 'transcribe' | 'settings';
   }
 
   let { activeTab = $bindable('notes') }: Props = $props();
@@ -25,6 +25,12 @@
       onclick={() => (activeTab = 'chat')}
       style="--wails-draggable: no-drag"
     >Chat</button>
+    <button
+      class="tab-btn"
+      class:active={activeTab === 'transcribe'}
+      onclick={() => (activeTab = 'transcribe')}
+      style="--wails-draggable: no-drag"
+    >Transcribe</button>
     <button
       class="tab-btn"
       class:active={activeTab === 'settings'}

@@ -2,10 +2,11 @@
   import Header from './lib/Header.svelte';
   import Notes from './lib/Notes.svelte';
   import Chat from './lib/Chat.svelte';
+  import Transcribe from './lib/Transcribe.svelte';
   import Settings from './lib/Settings.svelte';
   import type { ChatMessage } from './lib/types.js';
 
-  let activeTab = $state<'notes' | 'chat' | 'settings'>('notes');
+  let activeTab = $state<'notes' | 'chat' | 'transcribe' | 'settings'>('notes');
   let chatMessages = $state<ChatMessage[]>([]);
 </script>
 
@@ -17,6 +18,8 @@
       <Notes />
     {:else if activeTab === 'chat'}
       <Chat bind:messages={chatMessages} />
+    {:else if activeTab === 'transcribe'}
+      <Transcribe />
     {:else}
       <Settings />
     {/if}
