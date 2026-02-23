@@ -8,6 +8,6 @@ func RegisterGlobalHotkey()      {}
 func RegisterLocalKeyMonitor()   {}
 func UnregisterGlobalHotkey()    {}
 func UnregisterLocalKeyMonitor() {}
-func StartCapture(_ string) error  { return nil }
-func StopCapture()                 {}
-func RotateChunk(_ string) error   { return nil }
+func StartCapture(_ string) error { return nil }
+func StopCapture()                {}
+func RotateChunk(_ string) error  { return nil }
