@@ -18,7 +18,7 @@
   let elapsed = $state(0);
   let error = $state('');
   let intervalId: ReturnType<typeof setInterval> | null = null;
-  let liveEl: HTMLDivElement | undefined;
+  let liveEl = $state<HTMLDivElement | undefined>(undefined);
 
   $effect(() => {
     if (liveText && liveEl) {
@@ -111,11 +111,13 @@
         <span class="status-label">Recording — {formatElapsed(elapsed)}</span>
       </div>
 
-      {#if liveText}
-        <div class="live-scroll" bind:this={liveEl}>
+      <div class="live-scroll" bind:this={liveEl}>
+        {#if liveText}
           <pre class="live-text">{liveText}</pre>
-        </div>
-      {/if}
+        {:else}
+          <p class="live-waiting">Transcript will appear after the first 30s…</p>
+        {/if}
+      </div>
 
       <button class="record-btn stop" onclick={stop}>Stop</button>
 
@@ -219,6 +221,14 @@
     color: rgba(255, 255, 255, 0.65);
     white-space: pre-wrap;
     word-break: break-word;
+  }
+
+  .live-waiting {
+    margin: 0;
+    padding: 10px;
+    font-size: 11px;
+    color: rgba(255, 255, 255, 0.2);
+    font-style: italic;
   }
 
   .error {
