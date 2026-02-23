@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	anthropic "github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
@@ -16,6 +17,10 @@ import (
 type App struct {
 	ctx               context.Context
 	currentTranscript string
+	liveCancel        context.CancelFunc
+	liveChunkSeq      int
+	liveSegments      []string
+	liveMu            sync.Mutex
 }
 
 type Config struct {

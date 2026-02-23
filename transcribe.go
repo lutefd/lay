@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -8,10 +9,19 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/wailsapp/wails/v2/pkg/runtime"
 )
+
+const liveChunkInterval = 30 * time.Second
 
 func (a *App) StartRecording() (string, error) {
 	a.currentTranscript = ""
+	a.liveMu.Lock()
+	a.liveSegments = nil
+	a.liveChunkSeq = 0
+	a.liveMu.Unlock()
+
 	dir, err := recordingsDir()
 	if err != nil {
 		return "", err
@@ -19,36 +29,41 @@ func (a *App) StartRecording() (string, error) {
 	if err := StartCapture(dir); err != nil {
 		return "", err
 	}
+
+	liveCtx, cancel := context.WithCancel(a.ctx)
+	a.liveCancel = cancel
+	go a.liveTranscribeLoop(liveCtx, dir)
+
 	return dir, nil
 }
 
 func (a *App) StopRecording() error {
+	if a.liveCancel != nil {
+		a.liveCancel()
+		a.liveCancel = nil
+	}
 	StopCapture()
 	return nil
 }
 
-// Transcribe converts mic.caf to 16 kHz mono, runs whisper-cli, saves the
-// result to ~/.lay/transcripts/<session>.md and returns the transcript text.
+// Transcribe processes the final partial chunk, assembles the full transcript,
+// saves it, and returns the text.
 func (a *App) Transcribe(recordingDir string) (string, error) {
-	micCaf := filepath.Join(recordingDir, "mic.caf")
-	mixedWav := filepath.Join(recordingDir, "mixed.wav")
+	a.liveMu.Lock()
+	finalSeq := a.liveChunkSeq
+	a.liveMu.Unlock()
 
-	if err := afconvert(micCaf, mixedWav); err != nil {
-		return "", fmt.Errorf("audio conversion: %w", err)
+	finalChunk := filepath.Join(recordingDir, fmt.Sprintf("chunk-%d.caf", finalSeq))
+	if _, err := os.Stat(finalChunk); err == nil {
+		a.processChunk(finalChunk)
 	}
 
-	whisperBin, err := findWhisper()
-	if err != nil {
-		return "", err
-	}
-	modelPath, err := findModel()
-	if err != nil {
-		return "", err
-	}
+	a.liveMu.Lock()
+	transcript := strings.Join(a.liveSegments, "\n")
+	a.liveMu.Unlock()
 
-	transcript, err := runWhisper(whisperBin, modelPath, mixedWav)
-	if err != nil {
-		return "", err
+	if transcript == "" {
+		return "", fmt.Errorf("no transcript produced — check whisper setup and audio")
 	}
 
 	if err := saveTranscript(recordingDir, transcript); err != nil {
@@ -58,6 +73,64 @@ func (a *App) Transcribe(recordingDir string) (string, error) {
 	a.currentTranscript = transcript
 	os.RemoveAll(recordingDir)
 	return transcript, nil
+}
+
+// liveTranscribeLoop rotates the live chunk every liveChunkInterval, converts
+// and runs whisper on each completed chunk, and emits segments via Wails events.
+func (a *App) liveTranscribeLoop(ctx context.Context, dir string) {
+	ticker := time.NewTicker(liveChunkInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			a.liveMu.Lock()
+			seq := a.liveChunkSeq
+			a.liveChunkSeq++
+			a.liveMu.Unlock()
+
+			newChunk := filepath.Join(dir, fmt.Sprintf("chunk-%d.caf", seq+1))
+			if err := RotateChunk(newChunk); err != nil {
+				continue
+			}
+			oldChunk := filepath.Join(dir, fmt.Sprintf("chunk-%d.caf", seq))
+			a.processChunk(oldChunk)
+		}
+	}
+}
+
+// processChunk converts a .caf chunk to WAV, runs whisper on it, appends the
+// result to liveSegments, and emits a "transcribe:segment" event.
+func (a *App) processChunk(cafPath string) {
+	whisperBin, err := findWhisper()
+	if err != nil {
+		return
+	}
+	modelPath, err := findModel()
+	if err != nil {
+		return
+	}
+
+	wavPath := cafPath + ".wav"
+	if err := afconvert(cafPath, wavPath); err != nil {
+		os.Remove(cafPath)
+		return
+	}
+
+	text, err := runWhisper(whisperBin, modelPath, wavPath)
+	os.Remove(cafPath)
+	os.Remove(wavPath)
+	if err != nil || text == "" {
+		return
+	}
+
+	a.liveMu.Lock()
+	a.liveSegments = append(a.liveSegments, text)
+	a.liveMu.Unlock()
+
+	runtime.EventsEmit(a.ctx, "transcribe:segment", text)
 }
 
 // AppendTranscriptToNotes reads the saved transcript for recordingDir and
@@ -141,11 +214,7 @@ func runWhisper(bin, model, audio string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("whisper failed: %w", err)
 	}
-	transcript := strings.TrimSpace(string(out))
-	if transcript == "" {
-		return "", fmt.Errorf("whisper returned no output — check the audio file")
-	}
-	return transcript, nil
+	return strings.TrimSpace(string(out)), nil
 }
 
 // saveTranscript writes the transcript to ~/.lay/transcripts/<session>.md.

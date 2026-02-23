@@ -209,15 +209,17 @@ static void unregisterGlobalHotkey() {
 // Audio capture — ScreenCaptureKit (system audio) + AVAudioEngine (mic)
 // ──────────────────────────────────────────────────────────────────────────────
 
-static AVAudioEngine      *_audioEngine    = nil;
-static AVAudioFile        *_micAudioFile   = nil;
-static id                  _scStream       = nil;  // SCStream*
-static id                  _scDelegate     = nil;  // LaySCStreamDelegate*
-static ExtAudioFileRef     _sysExtFile     = NULL;
-static dispatch_queue_t    _audioWriteQ    = nil;
-static char               *_sysFilePath    = NULL; // malloc'd, owned here
-static BOOL                _sysFileReady   = NO;   // file created on first callback
-static BOOL                _isRecording    = NO;
+static AVAudioEngine      *_audioEngine       = nil;
+static AVAudioFile        *_micAudioFile      = nil;
+static AVAudioFile        *_chunkMicFile      = nil;  // current live chunk
+static AVAudioFormat      *_micRecordingFmt   = nil;  // hardware format for chunk creation
+static id                  _scStream          = nil;  // SCStream*
+static id                  _scDelegate        = nil;  // LaySCStreamDelegate*
+static ExtAudioFileRef     _sysExtFile        = NULL;
+static dispatch_queue_t    _audioWriteQ       = nil;
+static char               *_sysFilePath       = NULL; // malloc'd, owned here
+static BOOL                _sysFileReady      = NO;   // file created on first callback
+static BOOL                _isRecording       = NO;
 
 @interface LaySCStreamDelegate : NSObject <SCStreamOutput, SCStreamDelegate>
 @end
@@ -276,6 +278,20 @@ static BOOL                _isRecording    = NO;
 
 @end
 
+// rotateChunk finalizes the current live chunk and opens a new one at newPath.
+// The old chunk is flushed to disk by ARC when _chunkMicFile is set to nil.
+// Returns 0 on success, -1 on error.
+static int rotateChunk(const char *newPath) {
+    if (!_micRecordingFmt) return -1;
+    _chunkMicFile = nil; // ARC flushes old chunk to disk
+    NSURL *url = [NSURL fileURLWithPath:[NSString stringWithUTF8String:newPath]];
+    NSError *err = nil;
+    _chunkMicFile = [[AVAudioFile alloc] initForWriting:url
+                                              settings:_micRecordingFmt.settings
+                                                 error:&err];
+    return err ? -1 : 0;
+}
+
 // startCapture starts both mic and system audio capture into outDir.
 // Returns NULL on success, or a malloc'd C string with the error message.
 static const char *startCapture(const char *outDir) {
@@ -302,14 +318,21 @@ static const char *startCapture(const char *outDir) {
         return strdup(micErr.localizedDescription.UTF8String);
     }
 
+    // Store format for live chunk file creation and open the first chunk.
+    _micRecordingFmt = micFmt;
+    NSURL *chunk0URL = [NSURL fileURLWithPath:
+        [dir stringByAppendingPathComponent:@"chunk-0.caf"]];
+    _chunkMicFile = [[AVAudioFile alloc] initForWriting:chunk0URL
+                                              settings:micFmt.settings
+                                                 error:nil];
+
     // Install tap in the file's processingFormat so AVAudioEngine converts
     // from the hardware format for us before we write.
     AVAudioFormat *tapFmt = _micAudioFile.processingFormat;
     [inputNode installTapOnBus:0 bufferSize:4096 format:tapFmt
                          block:^(AVAudioPCMBuffer *buf, AVAudioTime *when) {
-        if (_micAudioFile) {
-            [_micAudioFile writeFromBuffer:buf error:nil];
-        }
+        if (_micAudioFile) [_micAudioFile writeFromBuffer:buf error:nil];
+        if (_chunkMicFile) [_chunkMicFile writeFromBuffer:buf error:nil];
     }];
 
     NSError *engErr = nil;
@@ -414,7 +437,9 @@ static void stopCapture(void) {
         [_audioEngine stop];
         _audioEngine = nil;
     }
-    _micAudioFile = nil; // ARC release flushes the CAF
+    _micAudioFile = nil;    // ARC release flushes the full recording
+    _chunkMicFile = nil;    // ARC release flushes the final live chunk
+    _micRecordingFmt = nil;
 
     if (@available(macOS 13.0, *)) {
         if (_scStream) {
@@ -490,4 +515,14 @@ func StartCapture(dir string) error {
 // StopCapture stops any active capture and flushes audio to disk.
 func StopCapture() {
 	C.stopCapture()
+}
+
+// RotateChunk finalizes the current live chunk file and opens a new one at newPath.
+func RotateChunk(newPath string) error {
+	cs := C.CString(newPath)
+	defer C.free(unsafe.Pointer(cs))
+	if C.rotateChunk(cs) != 0 {
+		return errors.New("chunk rotation failed")
+	}
+	return nil
 }

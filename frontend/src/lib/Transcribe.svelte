@@ -1,5 +1,6 @@
 <script lang="ts">
   import { StartRecording, StopRecording, Transcribe } from '../../wailsjs/go/main/App.js';
+  import { EventsOn, EventsOff } from '../../wailsjs/runtime/runtime.js';
   import Transcript from './Transcript.svelte';
 
   interface Props {
@@ -13,22 +14,37 @@
   let state = $state<State>('idle');
   let recordingDir = $state('');
   let transcript = $state('');
+  let liveText = $state('');
   let elapsed = $state(0);
   let error = $state('');
   let intervalId: ReturnType<typeof setInterval> | null = null;
+  let liveEl: HTMLDivElement | undefined;
+
+  $effect(() => {
+    if (liveText && liveEl) {
+      liveEl.scrollTop = liveEl.scrollHeight;
+    }
+  });
 
   async function start() {
     error = '';
     transcript = '';
+    liveText = '';
     state = 'recording';
     elapsed = 0;
     onRecordingChange?.(true);
     intervalId = setInterval(() => elapsed++, 1000);
+
+    EventsOn('transcribe:segment', (segment: string) => {
+      liveText = liveText ? liveText + '\n' + segment : segment;
+    });
+
     try {
       recordingDir = await StartRecording();
     } catch (e: unknown) {
       clearInterval(intervalId!);
       intervalId = null;
+      EventsOff('transcribe:segment');
       error = e instanceof Error ? e.message : String(e);
       state = 'idle';
       onRecordingChange?.(false);
@@ -36,6 +52,7 @@
   }
 
   async function stop() {
+    EventsOff('transcribe:segment');
     if (intervalId) { clearInterval(intervalId); intervalId = null; }
     state = 'stopping';
     try {
@@ -60,6 +77,7 @@
   function reset() {
     state = 'idle';
     transcript = '';
+    liveText = '';
     error = '';
   }
 
@@ -92,6 +110,13 @@
         <span class="dot recording"></span>
         <span class="status-label">Recording — {formatElapsed(elapsed)}</span>
       </div>
+
+      {#if liveText}
+        <div class="live-scroll" bind:this={liveEl}>
+          <pre class="live-text">{liveText}</pre>
+        </div>
+      {/if}
+
       <button class="record-btn stop" onclick={stop}>Stop</button>
 
     {:else}
@@ -116,7 +141,8 @@
     justify-content: center;
     gap: 16px;
     flex: 1;
-    padding: 24px 20px;
+    min-height: 0;
+    padding: 16px 14px;
     color: rgba(255, 255, 255, 0.85);
     font-size: 13px;
   }
@@ -173,6 +199,26 @@
     color: rgba(255, 255, 255, 0.3);
     text-align: center;
     margin: 0;
+  }
+
+  .live-scroll {
+    flex: 1;
+    overflow-y: auto;
+    min-height: 0;
+    width: 100%;
+    border-radius: 6px;
+    background: rgba(255, 255, 255, 0.04);
+  }
+
+  .live-text {
+    margin: 0;
+    padding: 10px;
+    font-family: 'SF Mono', 'Menlo', monospace;
+    font-size: 11px;
+    line-height: 1.6;
+    color: rgba(255, 255, 255, 0.65);
+    white-space: pre-wrap;
+    word-break: break-word;
   }
 
   .error {
