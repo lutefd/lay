@@ -155,31 +155,39 @@ func (a *App) AppendTranscriptToNotes(recordingDir string) error {
 	return err
 }
 
+// minWavBytes is the minimum WAV size worth passing to whisper-cli.
+// A 16 kHz mono int16 WAV needs at least ~0.5 s of audio to avoid crashing.
+const minWavBytes = 16000 * 2 / 2 // 0.5 s × 16000 Hz × 2 bytes, ÷2 safety margin
+
 // transcribeDual converts micCaf and sysCaf to WAV separately, runs whisper
 // on each, merges the results chronologically, and returns clean text.
 // System audio is optional — mic-only output is returned when sysCaf is absent.
+// Whisper failures are treated as empty output so one bad source never blocks the other.
 func transcribeDual(whisperBin, modelPath, micCaf, sysCaf string) (string, error) {
-	micWav := micCaf + ".wav"
-	if err := afconvert(micCaf, micWav); err != nil {
-		return "", fmt.Errorf("afconvert mic: %w", err)
+	micRaw := whisperOnCaf(whisperBin, modelPath, micCaf)
+	sysRaw := whisperOnCaf(whisperBin, modelPath, sysCaf)
+	if micRaw == "" && sysRaw == "" {
+		return "", nil
 	}
-	defer os.Remove(micWav)
-
-	micRaw, err := runWhisper(whisperBin, modelPath, micWav)
-	if err != nil {
-		return "", fmt.Errorf("whisper mic: %w", err)
-	}
-
-	var sysRaw string
-	if _, err := os.Stat(sysCaf); err == nil {
-		sysWav := sysCaf + ".wav"
-		if err := afconvert(sysCaf, sysWav); err == nil {
-			defer os.Remove(sysWav)
-			sysRaw, _ = runWhisper(whisperBin, modelPath, sysWav)
-		}
-	}
-
 	return mergeTranscripts(micRaw, sysRaw), nil
+}
+
+// whisperOnCaf converts a CAF file to WAV and runs whisper, returning the raw
+// timestamped output. Returns "" on any error (missing file, too short, crash).
+func whisperOnCaf(whisperBin, modelPath, cafPath string) string {
+	if fi, err := os.Stat(cafPath); err != nil || fi.Size() == 0 {
+		return ""
+	}
+	wavPath := cafPath + ".wav"
+	if err := afconvert(cafPath, wavPath); err != nil {
+		return ""
+	}
+	defer os.Remove(wavPath)
+	if fi, err := os.Stat(wavPath); err != nil || fi.Size() < minWavBytes {
+		return ""
+	}
+	out, _ := runWhisper(whisperBin, modelPath, wavPath)
+	return out
 }
 
 type tsSegment struct {
