@@ -11,6 +11,7 @@ import (
 )
 
 func (a *App) StartRecording() (string, error) {
+	a.currentTranscript = ""
 	dir, err := recordingsDir()
 	if err != nil {
 		return "", err
@@ -54,6 +55,8 @@ func (a *App) Transcribe(recordingDir string) (string, error) {
 		return "", fmt.Errorf("save transcript: %w", err)
 	}
 
+	a.currentTranscript = transcript
+	os.RemoveAll(recordingDir)
 	return transcript, nil
 }
 

@@ -2,6 +2,12 @@
   import { StartRecording, StopRecording, Transcribe } from '../../wailsjs/go/main/App.js';
   import Transcript from './Transcript.svelte';
 
+  interface Props {
+    onRecordingChange?: (isRecording: boolean) => void;
+  }
+
+  let { onRecordingChange }: Props = $props();
+
   type State = 'idle' | 'recording' | 'stopping' | 'transcribing' | 'done';
 
   let state = $state<State>('idle');
@@ -16,6 +22,7 @@
     transcript = '';
     state = 'recording';
     elapsed = 0;
+    onRecordingChange?.(true);
     intervalId = setInterval(() => elapsed++, 1000);
     try {
       recordingDir = await StartRecording();
@@ -24,6 +31,7 @@
       intervalId = null;
       error = e instanceof Error ? e.message : String(e);
       state = 'idle';
+      onRecordingChange?.(false);
     }
   }
 
@@ -35,6 +43,7 @@
     } catch (e: unknown) {
       error = e instanceof Error ? e.message : String(e);
       state = 'idle';
+      onRecordingChange?.(false);
       return;
     }
     state = 'transcribing';
@@ -45,6 +54,7 @@
       error = e instanceof Error ? e.message : String(e);
       state = 'idle';
     }
+    onRecordingChange?.(false);
   }
 
   function reset() {

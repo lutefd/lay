@@ -8,21 +8,24 @@
 
   let activeTab = $state<'notes' | 'chat' | 'transcribe' | 'settings'>('notes');
   let chatMessages = $state<ChatMessage[]>([]);
+  let isRecording = $state(false);
 </script>
 
 <div class="app">
-  <Header bind:activeTab />
+  <Header bind:activeTab {isRecording} />
 
   <main class="content">
     {#if activeTab === 'notes'}
       <Notes />
     {:else if activeTab === 'chat'}
       <Chat bind:messages={chatMessages} />
-    {:else if activeTab === 'transcribe'}
-      <Transcribe />
-    {:else}
+    {:else if activeTab === 'settings'}
       <Settings />
     {/if}
+    <!-- Transcribe is always mounted so recording survives tab switches -->
+    <div class="transcribe-slot" class:hidden={activeTab !== 'transcribe'}>
+      <Transcribe onRecordingChange={(v) => (isRecording = v)} />
+    </div>
   </main>
 </div>
 
@@ -41,5 +44,13 @@
     flex: 1;
     min-height: 0;
     overflow: hidden;
+  }
+
+  .transcribe-slot {
+    display: contents;
+  }
+
+  .transcribe-slot.hidden {
+    display: none;
   }
 </style>

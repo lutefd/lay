@@ -14,7 +14,8 @@ import (
 )
 
 type App struct {
-	ctx context.Context
+	ctx               context.Context
+	currentTranscript string
 }
 
 type Config struct {
@@ -106,6 +107,14 @@ func (a *App) SendMessage(conversationJSON string) (string, error) {
 	return a.sendAnthropic(cfg, messages)
 }
 
+func (a *App) systemPrompt() string {
+	base := "You are a helpful meeting assistant. Be concise and practical. Format responses in markdown when it aids clarity."
+	if a.currentTranscript == "" {
+		return base
+	}
+	return base + "\n\nThe user has a meeting transcript from this session. Use it to answer questions about the meeting.\n\n<transcript>\n" + a.currentTranscript + "\n</transcript>"
+}
+
 func (a *App) sendAnthropic(cfg Config, messages []Message) (string, error) {
 	if cfg.AnthropicKey == "" {
 		return "", fmt.Errorf("Anthropic API key not set — open Settings to add your key")
@@ -128,7 +137,7 @@ func (a *App) sendAnthropic(cfg Config, messages []Message) (string, error) {
 		MaxTokens: 2048,
 		Messages:  apiMessages,
 		System: []anthropic.TextBlockParam{
-			{Text: "You are a helpful meeting assistant. Be concise and practical. Format responses in markdown when it aids clarity."},
+			{Text: a.systemPrompt()},
 		},
 	})
 	if err != nil {
@@ -152,7 +161,7 @@ func (a *App) sendOpenAI(cfg Config, messages []Message) (string, error) {
 	var msgs []openai.ChatCompletionMessage
 	msgs = append(msgs, openai.ChatCompletionMessage{
 		Role:    openai.ChatMessageRoleSystem,
-		Content: "You are a helpful meeting assistant. Be concise and practical. Format responses in markdown when it aids clarity.",
+		Content: a.systemPrompt(),
 	})
 	for _, m := range messages {
 		role := openai.ChatMessageRoleUser
