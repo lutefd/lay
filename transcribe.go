@@ -248,6 +248,7 @@ func mergeTranscripts(micRaw, sysRaw string, offsetSecs float64) string {
 	sort.Slice(segs, func(i, j int) bool {
 		return segs[i].start < segs[j].start
 	})
+	segs = deduplicateSegments(segs)
 	var sb strings.Builder
 	for _, s := range segs {
 		label := "You"
@@ -257,6 +258,27 @@ func mergeTranscripts(micRaw, sysRaw string, offsetSecs float64) string {
 		sb.WriteString(fmt.Sprintf("[%s] [%s] %s\n", formatTS(s.start), label, s.text))
 	}
 	return strings.TrimSpace(sb.String())
+}
+
+// deduplicateSegments removes segments where the same speaker repeats identical
+// text within a 60-second window. Whisper commonly hallucinates by looping the
+// last phrase during silence at the end of an audio file.
+func deduplicateSegments(segs []tsSegment) []tsSegment {
+	const dupWindow = 60.0
+	out := make([]tsSegment, 0, len(segs))
+	for _, s := range segs {
+		dup := false
+		for i := len(out) - 1; i >= 0 && s.start-out[i].start <= dupWindow; i-- {
+			if out[i].label == s.label && strings.EqualFold(strings.TrimSpace(out[i].text), strings.TrimSpace(s.text)) {
+				dup = true
+				break
+			}
+		}
+		if !dup {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 // formatTS formats seconds as HH:MM:SS.mmm.
