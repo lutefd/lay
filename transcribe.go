@@ -55,7 +55,7 @@ func (a *App) Transcribe(recordingDir string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	modelPath, err := findModel()
+	modelPath, err := findFinalModel()
 	if err != nil {
 		return "", err
 	}
@@ -115,7 +115,7 @@ func (a *App) processChunk(micCaf string, seq int) {
 	if err != nil {
 		return
 	}
-	modelPath, err := findModel()
+	modelPath, err := findLiveModel()
 	if err != nil {
 		return
 	}
@@ -301,22 +301,37 @@ func findWhisper() (string, error) {
 	)
 }
 
-// findModel locates ggml-small.bin: app bundle → ~/.lay/models/.
-func findModel() (string, error) {
-	const model = "ggml-small.bin"
+// findModelFile locates a whisper model by filename: app bundle → ~/.lay/models/.
+func findModelFile(name string) (string, error) {
 	if exe, err := os.Executable(); err == nil {
-		candidate := filepath.Join(filepath.Dir(exe), "..", "Resources", "models", model)
+		candidate := filepath.Join(filepath.Dir(exe), "..", "Resources", "models", name)
 		if _, err := os.Stat(candidate); err == nil {
 			return filepath.Clean(candidate), nil
 		}
 	}
-	local := filepath.Join(layDir(), "models", model)
+	local := filepath.Join(layDir(), "models", name)
 	if _, err := os.Stat(local); err == nil {
 		return local, nil
 	}
-	return "", fmt.Errorf(
-		"model not found — download ggml-small.bin to ~/.lay/models/ from huggingface.co/ggerganov/whisper.cpp",
-	)
+	return "", fmt.Errorf("model %s not found in app bundle or ~/.lay/models/", name)
+}
+
+// findLiveModel returns the small model used for low-latency live chunk transcription.
+func findLiveModel() (string, error) {
+	p, err := findModelFile("ggml-small.bin")
+	if err != nil {
+		return "", fmt.Errorf("model not found — download ggml-small.bin to ~/.lay/models/ from huggingface.co/ggerganov/whisper.cpp")
+	}
+	return p, nil
+}
+
+// findFinalModel returns the large-v3-turbo model used for the full post-recording
+// transcription. Falls back to small if turbo is not bundled.
+func findFinalModel() (string, error) {
+	if p, err := findModelFile("ggml-large-v3-turbo.bin"); err == nil {
+		return p, nil
+	}
+	return findLiveModel()
 }
 
 // runWhisper runs whisper-cli and returns the timestamped transcript from stdout.

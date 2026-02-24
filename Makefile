@@ -1,7 +1,8 @@
 # Defaults — override on the command line if needed:
-#   make build WHISPER_BIN=/path/to/whisper-cli MODEL_PATH=/path/to/ggml-small.bin
-WHISPER_BIN ?= $(shell which whisper-cli 2>/dev/null)
-MODEL_PATH  ?= $(HOME)/.lay/models/ggml-small.bin
+#   make build WHISPER_BIN=/path/to/whisper-cli SMALL_MODEL=/path/to/ggml-small.bin
+WHISPER_BIN  ?= $(shell which whisper-cli 2>/dev/null)
+SMALL_MODEL  ?= $(HOME)/.lay/models/ggml-small.bin
+TURBO_MODEL  ?= $(HOME)/.lay/models/ggml-large-v3-turbo.bin
 
 APP_RESOURCES := build/bin/lay.app/Contents/Resources
 
@@ -26,17 +27,25 @@ build:
 	@if [ -z "$(WHISPER_BIN)" ]; then \
 		echo "ERROR: whisper-cli not found. Run: brew install whisper-cpp"; exit 1; \
 	fi
-	@if [ ! -f "$(MODEL_PATH)" ]; then \
-		echo "ERROR: model not found at $(MODEL_PATH)."; \
-		echo "  Run: mkdir -p ~/.lay/models && curl -L -o ~/.lay/models/ggml-small.bin \\"; \
+	@if [ ! -f "$(SMALL_MODEL)" ]; then \
+		echo "ERROR: small model not found at $(SMALL_MODEL)."; \
+		echo "  Run: mkdir -p ~/.lay/models && curl -L -o $(SMALL_MODEL) \\"; \
 		echo "    https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin"; \
 		exit 1; \
+	fi
+	@if [ ! -f "$(TURBO_MODEL)" ]; then \
+		echo "WARNING: large-v3-turbo model not found — final transcription will fall back to small."; \
+		echo "  Download: curl -L -o $(TURBO_MODEL) \\"; \
+		echo "    https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo.bin"; \
 	fi
 	@echo "→ Bundling whisper-cli and dylibs…"
 	mkdir -p "$(APP_RESOURCES)/models"
 	mkdir -p "$(APP_RESOURCES)/../lib"
-	cp "$(WHISPER_BIN)" "$(APP_RESOURCES)/whisper-cli"
-	cp "$(MODEL_PATH)"  "$(APP_RESOURCES)/models/ggml-small.bin"
+	cp "$(WHISPER_BIN)"  "$(APP_RESOURCES)/whisper-cli"
+	cp "$(SMALL_MODEL)"  "$(APP_RESOURCES)/models/ggml-small.bin"
+	@if [ -f "$(TURBO_MODEL)" ]; then \
+		cp "$(TURBO_MODEL)" "$(APP_RESOURCES)/models/ggml-large-v3-turbo.bin"; \
+	fi
 	@REAL=$$(readlink -f "$(WHISPER_BIN)"); \
 	RPATH=$$(otool -l "$$REAL" | awk '/LC_RPATH/{f=1} f && /path/{print $$2; exit}'); \
 	DYLIB_DIR="$${RPATH/@loader_path/$$(dirname $$REAL)}"; \
