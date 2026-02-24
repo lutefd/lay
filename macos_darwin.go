@@ -8,6 +8,7 @@ package main
 
 #import <Cocoa/Cocoa.h>
 #import <dispatch/dispatch.h>
+#import <objc/runtime.h>
 #include <Carbon/Carbon.h>
 #import <AVFoundation/AVFoundation.h>
 #import <AudioToolbox/AudioToolbox.h>
@@ -18,8 +19,65 @@ package main
 static EventHotKeyRef  _hotKeyRefs[5]    = { NULL };
 static EventHandlerRef _hotKeyHandlerRef = NULL;
 static id _localKeyMonitor = nil;
+static Class _layPanelClass = nil;
+static CGFloat _savedAlpha = 1.0;
 
-// toggleWindow checks the real window state and minimises or restores accordingly.
+// makeWindowStealth converts the Wails NSWindow into a non-activating NSPanel
+// at runtime so that clicking or toggling lay never triggers a browser blur event.
+// NSPanel and NSWindow share the same ivar layout on modern macOS, making the
+// object_setClass swap safe. Must be called after the window is fully initialised.
+static void makeWindowStealth() {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        NSWindow *w = [NSApp mainWindow];
+        if (!w) {
+            for (NSWindow *win in [NSApp windows]) { w = win; break; }
+        }
+        if (!w) return;
+
+        // Build the subclass once; subsequent calls are no-ops.
+        if (!_layPanelClass) {
+            _layPanelClass = objc_allocateClassPair([NSPanel class], "LayGhostPanel", 0);
+            if (!_layPanelClass) {
+                _layPanelClass = objc_getClass("LayGhostPanel"); // already registered
+            } else {
+                // Always accept keyboard input so text fields in lay still work.
+                class_addMethod(_layPanelClass, @selector(canBecomeKey),
+                    imp_implementationWithBlock(^BOOL(id _){ return YES; }), "c@:");
+                // Never claim main-window status.
+                class_addMethod(_layPanelClass, @selector(canBecomeMain),
+                    imp_implementationWithBlock(^BOOL(id _){ return NO; }), "c@:");
+                objc_registerClassPair(_layPanelClass);
+            }
+        }
+        if (!_layPanelClass) return;
+
+        // Re-class the live Wails window to our non-activating panel subclass.
+        object_setClass(w, _layPanelClass);
+
+        // NSWindowStyleMaskNonactivatingPanel (1<<7 = 128): clicking or ordering
+        // this window to front will NOT activate the lay application, so the
+        // browser (or any other app) never receives a focus-loss / blur event.
+        NSWindowStyleMask mask = [w styleMask];
+        if (!(mask & NSWindowStyleMaskNonactivatingPanel)) {
+            [w setStyleMask:mask | NSWindowStyleMaskNonactivatingPanel];
+        }
+
+        NSPanel *p = (NSPanel *)w;
+        [p setHidesOnDeactivate:NO];  // stay visible when lay is in background
+
+        // Hidden from Mission Control, Exposé, cmd+`, and Spaces cycling.
+        [w setCollectionBehavior:
+            NSWindowCollectionBehaviorCanJoinAllSpaces  |
+            NSWindowCollectionBehaviorStationary        |
+            NSWindowCollectionBehaviorIgnoresCycle      |
+            NSWindowCollectionBehaviorFullScreenAuxiliary];
+    });
+}
+
+// toggleWindow soft-hides or soft-shows the window using alpha + ignoresMouseEvents
+// instead of orderOut/orderFront. This keeps the WKWebView in the window hierarchy
+// so it never resets its HTML focus or first-responder state — which is why text
+// fields work immediately after showing again. orderOut would tear that state down.
 // Must be called on the main thread.
 static void toggleWindow() {
     NSWindow *w = [NSApp mainWindow];
@@ -31,15 +89,20 @@ static void toggleWindow() {
     }
     if (!w) return;
 
-    if ([w isMiniaturized]) {
-        [w deminiaturize:nil];
-        [NSApp activateIgnoringOtherApps:YES];
-    } else if (![NSApp isHidden] && [w isVisible]) {
-        [w miniaturize:nil];
+    BOOL hidden = ![w isVisible] || [w alphaValue] < 0.01;
+
+    if (!hidden) {
+        // Soft-hide: go transparent and pass mouse events through.
+        // The window stays ordered so WKWebView keeps all its internal state.
+        _savedAlpha = [w alphaValue] > 0.05 ? [w alphaValue] : 1.0;
+        [w setAlphaValue:0.0];
+        [w setIgnoresMouseEvents:YES];
     } else {
-        [NSApp unhide:nil];
-        [NSApp activateIgnoringOtherApps:YES];
-        [w makeKeyAndOrderFront:nil];
+        // Soft-show: restore opacity and re-enable mouse events.
+        // orderFrontRegardless brings it front without activating the lay app.
+        [w setIgnoresMouseEvents:NO];
+        [w setAlphaValue:_savedAlpha];
+        [w orderFrontRegardless];
     }
 }
 
@@ -887,6 +950,13 @@ import (
 // ProtectWindow makes the overlay invisible to screen capture.
 func ProtectWindow() {
 	C.protectAllWindows()
+}
+
+// MakeWindowStealth converts the window into a non-activating panel so that
+// switching to or clicking lay never fires a blur/focus-loss event in the
+// previously focused application (e.g. a browser during a meeting).
+func MakeWindowStealth() {
+	C.makeWindowStealth()
 }
 
 // SetAccessoryPolicy hides lay from the macOS menu bar and Dock.

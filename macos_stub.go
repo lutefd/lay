@@ -3,6 +3,7 @@
 package main
 
 func ProtectWindow()             {}
+func MakeWindowStealth()         {}
 func SetAccessoryPolicy()        {}
 func RegisterGlobalHotkey()      {}
 func RegisterLocalKeyMonitor()   {}
