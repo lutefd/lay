@@ -1,9 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "Bash(PRE_COMMIT_ALLOW_NO_CONFIG=1 git add:*)",
-      "Bash(go build:*)",
-      "Bash(go get:*)"
-    ]
-  }
-}
