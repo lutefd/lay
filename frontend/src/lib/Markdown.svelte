@@ -1,5 +1,6 @@
 <script lang="ts">
   import { marked } from 'marked';
+  import { BrowserOpenURL } from '../../wailsjs/runtime/runtime.js';
 
   interface Props {
     raw: string;
@@ -18,10 +19,24 @@
     e.preventDefault();
     e.clipboardData?.setData('text/plain', raw);
   }
+
+  function handleClick(e: MouseEvent) {
+    const target = e.target as HTMLElement | null;
+    if (!target) return;
+
+    const link = target.closest('a') as HTMLAnchorElement | null;
+    if (!link || !link.href) return;
+
+    const href = link.href;
+    if (!/^https?:|^mailto:/i.test(href)) return;
+
+    e.preventDefault();
+    BrowserOpenURL(href);
+  }
 </script>
 
 <!-- svelte-ignore a11y_no_static_element_interactions -->
-<div class="md {className}" oncopy={handleCopy}>
+<div class="md {className}" oncopy={handleCopy} onclick={handleClick}>
   {@html html}
 </div>
 
