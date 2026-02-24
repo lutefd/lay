@@ -63,7 +63,7 @@ func (a *App) Transcribe(recordingDir string) (string, error) {
 	micPath := filepath.Join(recordingDir, "mic.caf")
 	sysPath := filepath.Join(recordingDir, "system.caf")
 
-	transcript, err := transcribeDual(whisperBin, modelPath, micPath, sysPath)
+	transcript, err := transcribeDual(whisperBin, modelPath, micPath, sysPath, 0)
 	if err != nil {
 		return "", err
 	}
@@ -101,15 +101,16 @@ func (a *App) liveTranscribeLoop(ctx context.Context, dir string) {
 				continue
 			}
 			oldMic := filepath.Join(dir, fmt.Sprintf("chunk-%d.caf", seq))
-			go a.processChunk(oldMic)
+			go a.processChunk(oldMic, seq)
 		}
 	}
 }
 
 // processChunk transcribes mic and system audio chunks separately, merges
-// them by timestamp, and emits the result for the live preview.
+// them by timestamp (offset by seq×chunkInterval so timestamps are
+// recording-relative), and emits the result for the live preview.
 // The sys chunk path is derived by convention: chunk-N.caf → chunk-sys-N.caf.
-func (a *App) processChunk(micCaf string) {
+func (a *App) processChunk(micCaf string, seq int) {
 	whisperBin, err := findWhisper()
 	if err != nil {
 		return
@@ -124,7 +125,8 @@ func (a *App) processChunk(micCaf string) {
 		strings.Replace(filepath.Base(micCaf), "chunk-", "chunk-sys-", 1),
 	)
 
-	text, err := transcribeDual(whisperBin, modelPath, micCaf, sysCaf)
+	offsetSecs := float64(seq) * liveChunkInterval.Seconds()
+	text, err := transcribeDual(whisperBin, modelPath, micCaf, sysCaf, offsetSecs)
 	os.Remove(micCaf)
 	os.Remove(sysCaf)
 	if err != nil || text == "" {
@@ -160,16 +162,17 @@ func (a *App) AppendTranscriptToNotes(recordingDir string) error {
 const minWavBytes = 16000 * 2 / 2 // 0.5 s × 16000 Hz × 2 bytes, ÷2 safety margin
 
 // transcribeDual converts micCaf and sysCaf to WAV separately, runs whisper
-// on each, merges the results chronologically, and returns clean text.
-// System audio is optional — mic-only output is returned when sysCaf is absent.
+// on each, and merges the results into a chronologically-ordered transcript.
+// offsetSecs is added to every timestamp so chunk-relative times become
+// recording-relative (pass 0 for full-file transcription).
 // Whisper failures are treated as empty output so one bad source never blocks the other.
-func transcribeDual(whisperBin, modelPath, micCaf, sysCaf string) (string, error) {
+func transcribeDual(whisperBin, modelPath, micCaf, sysCaf string, offsetSecs float64) (string, error) {
 	micRaw := whisperOnCaf(whisperBin, modelPath, micCaf)
 	sysRaw := whisperOnCaf(whisperBin, modelPath, sysCaf)
 	if micRaw == "" && sysRaw == "" {
 		return "", nil
 	}
-	return mergeTranscripts(micRaw, sysRaw), nil
+	return mergeTranscripts(micRaw, sysRaw, offsetSecs), nil
 }
 
 // whisperOnCaf converts a CAF file to WAV and runs whisper, returning the raw
@@ -192,6 +195,7 @@ func whisperOnCaf(whisperBin, modelPath, cafPath string) string {
 
 type tsSegment struct {
 	start float64
+	end   float64
 	text  string
 	label string // "you" or "them"
 }
@@ -217,33 +221,50 @@ func parseSegments(raw, label string) []tsSegment {
 			continue
 		}
 		start := parseWhisperTS(strings.TrimSpace(parts[0]))
+		end := parseWhisperTS(strings.TrimSpace(parts[1]))
 		if start < 0 {
 			continue
 		}
-		segs = append(segs, tsSegment{start: start, text: text, label: label})
+		segs = append(segs, tsSegment{start: start, end: end, text: text, label: label})
 	}
 	return segs
 }
 
-// mergeTranscripts interleaves mic and system whisper output by timestamp.
-// Mic segments are prefixed with "[You]" so speakers are distinguishable.
-func mergeTranscripts(micRaw, sysRaw string) string {
+// mergeTranscripts interleaves mic and system whisper output by millisecond-
+// accurate timestamp. offsetSecs shifts all timestamps to recording-relative
+// time (used for live chunks; pass 0 for full-file transcription).
+// Output format: [HH:MM:SS.mmm] [You/Them] text
+func mergeTranscripts(micRaw, sysRaw string, offsetSecs float64) string {
 	segs := parseSegments(micRaw, "you")
 	segs = append(segs, parseSegments(sysRaw, "them")...)
+	for i := range segs {
+		segs[i].start += offsetSecs
+		segs[i].end += offsetSecs
+	}
 	sort.Slice(segs, func(i, j int) bool {
 		return segs[i].start < segs[j].start
 	})
 	var sb strings.Builder
 	for _, s := range segs {
-		if s.label == "you" {
-			sb.WriteString("[You] ")
-		} else {
-			sb.WriteString("[Them] ")
+		label := "You"
+		if s.label == "them" {
+			label = "Them"
 		}
-		sb.WriteString(s.text)
-		sb.WriteByte('\n')
+		sb.WriteString(fmt.Sprintf("[%s] [%s] %s\n", formatTS(s.start), label, s.text))
 	}
 	return strings.TrimSpace(sb.String())
+}
+
+// formatTS formats seconds as HH:MM:SS.mmm.
+func formatTS(secs float64) string {
+	ms := int(secs*1000 + 0.5)
+	h := ms / 3600000
+	ms %= 3600000
+	m := ms / 60000
+	ms %= 60000
+	s := ms / 1000
+	ms %= 1000
+	return fmt.Sprintf("%02d:%02d:%02d.%03d", h, m, s, ms)
 }
 
 // afconvert converts src (any CoreAudio-readable format) to a 16 kHz mono
