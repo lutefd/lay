@@ -133,6 +133,10 @@ func (a *App) processChunk(micCaf string, seq int) {
 		return
 	}
 
+	a.liveMu.Lock()
+	a.liveSegments = append(a.liveSegments, text)
+	a.liveMu.Unlock()
+
 	runtime.EventsEmit(a.ctx, "transcribe:segment", text)
 }
 

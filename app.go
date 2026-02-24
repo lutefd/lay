@@ -114,10 +114,19 @@ func (a *App) SendMessage(conversationJSON string) (string, error) {
 
 func (a *App) systemPrompt() string {
 	base := "You are a helpful meeting assistant. Be concise and practical. Format responses in markdown when it aids clarity."
-	if a.currentTranscript == "" {
+
+	if a.currentTranscript != "" {
+		return base + "\n\nThe user has a meeting transcript from this session. Use it to answer questions about the meeting.\n\n<transcript>\n" + a.currentTranscript + "\n</transcript>"
+	}
+
+	a.liveMu.Lock()
+	live := strings.Join(a.liveSegments, "\n")
+	a.liveMu.Unlock()
+
+	if live == "" {
 		return base
 	}
-	return base + "\n\nThe user has a meeting transcript from this session. Use it to answer questions about the meeting.\n\n<transcript>\n" + a.currentTranscript + "\n</transcript>"
+	return base + "\n\nThe meeting is currently being recorded. Below is the live transcript so far — it may be incomplete.\n\n<transcript>\n" + live + "\n</transcript>"
 }
 
 func (a *App) sendAnthropic(cfg Config, messages []Message) (string, error) {
