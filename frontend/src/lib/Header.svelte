@@ -2,10 +2,11 @@
   import { WindowMinimise, Quit } from '../../wailsjs/runtime/runtime.js';
 
   interface Props {
-    activeTab: 'notes' | 'chat' | 'settings';
+    activeTab: 'notes' | 'chat' | 'transcribe' | 'settings';
+    isRecording?: boolean;
   }
 
-  let { activeTab = $bindable('notes') }: Props = $props();
+  let { activeTab = $bindable('notes'), isRecording = false }: Props = $props();
 </script>
 
 <!-- Entire header is the drag region; only the buttons themselves opt out -->
@@ -25,6 +26,12 @@
       onclick={() => (activeTab = 'chat')}
       style="--wails-draggable: no-drag"
     >Chat</button>
+    <button
+      class="tab-btn"
+      class:active={activeTab === 'transcribe'}
+      onclick={() => (activeTab = 'transcribe')}
+      style="--wails-draggable: no-drag"
+    >Transcribe{#if isRecording}<span class="rec-dot"></span>{/if}</button>
     <button
       class="tab-btn"
       class:active={activeTab === 'settings'}
@@ -120,5 +127,22 @@
   .ctrl-btn.close:hover {
     background: rgba(220, 60, 60, 0.5);
     color: #fff;
+  }
+
+  .rec-dot {
+    display: inline-block;
+    width: 5px;
+    height: 5px;
+    border-radius: 50%;
+    background: #e05252;
+    box-shadow: 0 0 4px #e05252;
+    margin-left: 4px;
+    vertical-align: middle;
+    animation: pulse 1.2s ease-in-out infinite;
+  }
+
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50%       { opacity: 0.4; }
   }
 </style>
