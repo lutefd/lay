@@ -40,6 +40,7 @@ func main() {
 			go func() {
 				time.Sleep(75 * time.Millisecond)
 				positionWindowTopRight(ctx)
+				MakeWindowStealth()
 			}()
 		},
 		OnShutdown: func(ctx context.Context) {
