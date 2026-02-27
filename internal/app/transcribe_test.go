@@ -1,4 +1,4 @@
-package main
+package app
 
 import (
 	"fmt"
@@ -102,4 +102,3 @@ func TestAppendLiveSegmentCapsChars(t *testing.T) {
 		t.Fatalf("expected newest segment to be retained")
 	}
 }
-

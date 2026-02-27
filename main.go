@@ -5,6 +5,8 @@ import (
 	"embed"
 	"time"
 
+	"lay/internal/platform"
+
 	"github.com/wailsapp/wails/v2"
 	"github.com/wailsapp/wails/v2/pkg/options"
 	"github.com/wailsapp/wails/v2/pkg/options/assetserver"
@@ -33,19 +35,19 @@ func main() {
 		},
 		OnStartup: func(ctx context.Context) {
 			app.startup(ctx)
-			ProtectWindow()
-			SetAccessoryPolicy()
-			RegisterGlobalHotkey()
-			RegisterLocalKeyMonitor()
+			platform.ProtectWindow()
+			platform.SetAccessoryPolicy()
+			platform.RegisterGlobalHotkey()
+			platform.RegisterLocalKeyMonitor()
 			go func() {
 				time.Sleep(75 * time.Millisecond)
 				positionWindowTopRight(ctx)
-				MakeWindowStealth()
+				platform.MakeWindowStealth()
 			}()
 		},
 		OnShutdown: func(ctx context.Context) {
-			UnregisterGlobalHotkey()
-			UnregisterLocalKeyMonitor()
+			platform.UnregisterGlobalHotkey()
+			platform.UnregisterLocalKeyMonitor()
 		},
 		Bind: []interface{}{
 			app,
@@ -57,7 +59,6 @@ func main() {
 			Appearance:           mac.NSAppearanceNameDarkAqua,
 		},
 		Windows: &windows.Options{
-			// Keep Windows 11 rounded corners + shadow in frameless mode.
 			DisableFramelessWindowDecorations: false,
 		},
 	})

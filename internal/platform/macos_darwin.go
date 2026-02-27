@@ -1,6 +1,6 @@
 //go:build darwin
 
-package main
+package platform
 
 /*
 #cgo CFLAGS: -x objective-c
@@ -1028,44 +1028,34 @@ import (
 	"unsafe"
 )
 
-// ProtectWindow makes the overlay invisible to screen capture.
 func ProtectWindow() {
 	C.protectAllWindows()
 }
 
-// MakeWindowStealth converts the window into a non-activating panel so that
-// switching to or clicking lay never fires a blur/focus-loss event in the
-// previously focused application (e.g. a browser during a meeting).
 func MakeWindowStealth() {
 	C.makeWindowStealth()
 }
 
-// SetAccessoryPolicy hides lay from the macOS menu bar and Dock.
 func SetAccessoryPolicy() {
 	C.setAccessoryPolicy()
 }
 
-// RegisterGlobalHotkey installs the ⌘+Shift+L Carbon hotkey (system-wide).
 func RegisterGlobalHotkey() {
 	C.registerGlobalHotkey()
 }
 
-// RegisterLocalKeyMonitor installs focused-only ⌘+Arrow shortcuts for window positioning.
 func RegisterLocalKeyMonitor() {
 	C.registerLocalKeyMonitor()
 }
 
-// UnregisterGlobalHotkey removes the Carbon hotkey and its event handler.
 func UnregisterGlobalHotkey() {
 	C.unregisterGlobalHotkey()
 }
 
-// UnregisterLocalKeyMonitor removes the focused-only key monitor.
 func UnregisterLocalKeyMonitor() {
 	C.unregisterLocalKeyMonitor()
 }
 
-// StartCapture begins mic + system audio capture, writing WAV files into dir.
 func StartCapture(dir string) error {
 	cs := C.CString(dir)
 	defer C.free(unsafe.Pointer(cs))
@@ -1078,12 +1068,10 @@ func StartCapture(dir string) error {
 	return nil
 }
 
-// StopCapture stops any active capture and flushes audio to disk.
 func StopCapture() {
 	C.stopCapture()
 }
 
-// RotateChunk finalizes the current live mic chunk and opens a new one.
 func RotateChunk(newMicPath string) error {
 	cs := C.CString(newMicPath)
 	defer C.free(unsafe.Pointer(cs))
@@ -1093,7 +1081,6 @@ func RotateChunk(newMicPath string) error {
 	return nil
 }
 
-// ConsumeCaptureEvent returns the next native capture warning, if any.
 func ConsumeCaptureEvent() (string, bool) {
 	cs := C.consumeCaptureEvent()
 	if cs == nil {

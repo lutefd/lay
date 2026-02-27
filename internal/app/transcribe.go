@@ -1,4 +1,4 @@
-package main
+package app
 
 import (
 	"context"
@@ -12,6 +12,8 @@ import (
 	"strings"
 	"time"
 	"unicode"
+
+	"lay/internal/platform"
 
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 )
@@ -38,11 +40,11 @@ func (a *App) StartRecording() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if err := StartCapture(dir); err != nil {
+	if err := platform.StartCapture(dir); err != nil {
 		return "", err
 	}
 	for {
-		if _, ok := ConsumeCaptureEvent(); !ok {
+		if _, ok := platform.ConsumeCaptureEvent(); !ok {
 			break
 		}
 	}
@@ -59,12 +61,10 @@ func (a *App) StopRecording() error {
 		a.liveCancel()
 		a.liveCancel = nil
 	}
-	StopCapture()
+	platform.StopCapture()
 	return nil
 }
 
-// Transcribe runs whisper separately on mic.caf and system.caf, then merges
-// the results by timestamp, saves the transcript, and returns the text.
 func (a *App) Transcribe(recordingDir string) (string, error) {
 	whisperBin, err := findWhisper()
 	if err != nil {
@@ -95,8 +95,6 @@ func (a *App) Transcribe(recordingDir string) (string, error) {
 	return transcript, nil
 }
 
-// liveTranscribeLoop rotates the live mic chunk every liveChunkInterval,
-// converts each completed chunk and runs whisper for the live preview.
 func (a *App) liveTranscribeLoop(ctx context.Context, dir string) {
 	chunkTicker := time.NewTicker(liveChunkInterval)
 	defer chunkTicker.Stop()
@@ -124,7 +122,7 @@ func (a *App) liveTranscribeLoop(ctx context.Context, dir string) {
 			a.liveMu.Unlock()
 
 			newMic := filepath.Join(dir, fmt.Sprintf("chunk-%d.caf", seq+1))
-			if err := RotateChunk(newMic); err != nil {
+			if err := platform.RotateChunk(newMic); err != nil {
 				runtime.EventsEmit(a.ctx, "recording:warning",
 					"Live chunk rotation failed; recording continues but live transcript may skip updates.")
 				continue
@@ -143,10 +141,6 @@ func (a *App) liveTranscribeLoop(ctx context.Context, dir string) {
 	}
 }
 
-// processChunk transcribes mic and system audio chunks separately, merges
-// them by timestamp (offset by seq×chunkInterval so timestamps are
-// recording-relative), and emits the result for the live preview.
-// The sys chunk path is derived by convention: chunk-N.caf → chunk-sys-N.caf.
 func (a *App) processChunk(micCaf string, seq int) {
 	whisperBin, err := findWhisper()
 	if err != nil {
@@ -204,7 +198,7 @@ func chunkSysPath(micPath string) string {
 
 func (a *App) emitCaptureEvents() {
 	for {
-		msg, ok := ConsumeCaptureEvent()
+		msg, ok := platform.ConsumeCaptureEvent()
 		if !ok {
 			return
 		}
@@ -212,8 +206,6 @@ func (a *App) emitCaptureEvents() {
 	}
 }
 
-// AppendTranscriptToNotes reads the saved transcript for recordingDir and
-// appends it as a dated section to ~/.lay/notes.md.
 func (a *App) AppendTranscriptToNotes(recordingDir string) error {
 	session := filepath.Base(recordingDir)
 	src := filepath.Join(layDir(), "transcripts", session+".md")
@@ -233,15 +225,8 @@ func (a *App) AppendTranscriptToNotes(recordingDir string) error {
 	return err
 }
 
-// minWavBytes is the minimum WAV size worth passing to whisper-cli.
-// A 16 kHz mono int16 WAV needs at least ~0.5 s of audio to avoid crashing.
 const minWavBytes = 16000 * 2 / 2 // 0.5 s × 16000 Hz × 2 bytes, ÷2 safety margin
 
-// transcribeDual converts micCaf and sysCaf to WAV separately, runs whisper
-// on each, and merges the results into a chronologically-ordered transcript.
-// offsetSecs is added to every timestamp so chunk-relative times become
-// recording-relative (pass 0 for full-file transcription).
-// Whisper failures are treated as empty output so one bad source never blocks the other.
 func transcribeDual(whisperBin, modelPath, micCaf, sysCaf string, offsetSecs float64) (string, error) {
 	micRaw := whisperOnCaf(whisperBin, modelPath, micCaf)
 	sysRaw := whisperOnCaf(whisperBin, modelPath, sysCaf)
@@ -251,8 +236,6 @@ func transcribeDual(whisperBin, modelPath, micCaf, sysCaf string, offsetSecs flo
 	return mergeTranscripts(micRaw, sysRaw, offsetSecs), nil
 }
 
-// whisperOnCaf converts a CAF file to WAV and runs whisper, returning the raw
-// timestamped output. Returns "" on any error (missing file, too short, crash).
 func whisperOnCaf(whisperBin, modelPath, cafPath string) string {
 	if fi, err := os.Stat(cafPath); err != nil || fi.Size() == 0 {
 		return ""
@@ -276,18 +259,12 @@ type tsSegment struct {
 	label string // "you" or "them"
 }
 
-// isWhisperHallucination returns true for segments Whisper emits during silence
-// instead of real speech: bracketed non-speech tokens like [Music], [Applause],
-// [música de fundo], [sons de futebol], and text that contains no letters or
-// digits at all (bare symbols such as ♪ ♫ …).
+// Whisper emits bracketed non-speech tokens and pure symbols during silence.
 func isWhisperHallucination(text string) bool {
 	t := strings.TrimSpace(text)
-	// Bracketed tokens: the entire text is wrapped in [...].
-	// Whisper uses these for non-speech events in whatever language it detected.
 	if strings.HasPrefix(t, "[") && strings.HasSuffix(t, "]") {
 		return true
 	}
-	// Pure symbol runs: no letter or digit anywhere in the segment.
 	for _, r := range t {
 		if unicode.IsLetter(r) || unicode.IsDigit(r) {
 			return false
@@ -307,7 +284,7 @@ func parseSegments(raw, label string) []tsSegment {
 		if idx < 0 {
 			continue
 		}
-		meta := line[1:idx] // "00:00:01.000 --> 00:00:04.000"
+		meta := line[1:idx]
 		text := strings.TrimSpace(line[idx+1:])
 		if text == "" || isWhisperHallucination(text) {
 			continue
@@ -326,10 +303,6 @@ func parseSegments(raw, label string) []tsSegment {
 	return segs
 }
 
-// mergeTranscripts interleaves mic and system whisper output by millisecond-
-// accurate timestamp. offsetSecs shifts all timestamps to recording-relative
-// time (used for live chunks; pass 0 for full-file transcription).
-// Output format: [HH:MM:SS.mmm] [You/Them] text
 func mergeTranscripts(micRaw, sysRaw string, offsetSecs float64) string {
 	segs := parseSegments(micRaw, "you")
 	segs = append(segs, parseSegments(sysRaw, "them")...)
@@ -352,20 +325,13 @@ func mergeTranscripts(micRaw, sysRaw string, offsetSecs float64) string {
 	return strings.TrimSpace(sb.String())
 }
 
-// deduplicateSegments removes segments where the same speaker repeats identical
-// text within a 60-second window. Whisper commonly hallucinates by looping the
-// last phrase during silence at the end of an audio file.
+// Drop repeated text across both channels to remove mic echo of system audio.
 func deduplicateSegments(segs []tsSegment) []tsSegment {
 	const dupWindow = 60.0
 	out := make([]tsSegment, 0, len(segs))
 	for _, s := range segs {
 		dup := false
 		for i := len(out) - 1; i >= 0 && s.start-out[i].start <= dupWindow; i-- {
-			// Deduplicate across speakers too: when there are no headphones the
-			// built-in mic acoustically picks up system audio from the speakers,
-			// causing the same speech to appear in both the "you" and "them"
-			// streams.  Segments are sorted by start time so the SCStream copy
-			// ("them") arrives first and the mic echo ("you") is dropped here.
 			if strings.EqualFold(strings.TrimSpace(out[i].text), strings.TrimSpace(s.text)) {
 				dup = true
 				break
@@ -378,7 +344,6 @@ func deduplicateSegments(segs []tsSegment) []tsSegment {
 	return out
 }
 
-// formatTS formats seconds as HH:MM:SS.mmm.
 func formatTS(secs float64) string {
 	ms := int(secs*1000 + 0.5)
 	h := ms / 3600000
@@ -390,15 +355,12 @@ func formatTS(secs float64) string {
 	return fmt.Sprintf("%02d:%02d:%02d.%03d", h, m, s, ms)
 }
 
-// afconvert converts src (any CoreAudio-readable format) to a 16 kHz mono
-// little-endian int16 WAV at dst using the system afconvert utility.
 func afconvert(src, dst string) error {
 	cmd := exec.Command("afconvert", "-f", "WAVE", "-d", "LEI16@16000", "-c", "1", src, dst)
 	cmd.Stderr = io.Discard
 	return cmd.Run()
 }
 
-// findWhisper locates the whisper-cli binary: app bundle → ~/.lay/ → $PATH.
 func findWhisper() (string, error) {
 	if exe, err := os.Executable(); err == nil {
 		candidate := filepath.Join(filepath.Dir(exe), "..", "Resources", "whisper-cli")
@@ -420,7 +382,6 @@ func findWhisper() (string, error) {
 	)
 }
 
-// findModelFile locates a whisper model by filename: app bundle → ~/.lay/models/.
 func findModelFile(name string) (string, error) {
 	if exe, err := os.Executable(); err == nil {
 		candidate := filepath.Join(filepath.Dir(exe), "..", "Resources", "models", name)
@@ -435,7 +396,6 @@ func findModelFile(name string) (string, error) {
 	return "", fmt.Errorf("model %s not found in app bundle or ~/.lay/models/", name)
 }
 
-// findLiveModel returns the small model used for low-latency live chunk transcription.
 func findLiveModel() (string, error) {
 	p, err := findModelFile("ggml-small.bin")
 	if err != nil {
@@ -444,8 +404,6 @@ func findLiveModel() (string, error) {
 	return p, nil
 }
 
-// findFinalModel returns the large-v3-turbo model used for the full post-recording
-// transcription. Falls back to small if turbo is not bundled.
 func findFinalModel() (string, error) {
 	if p, err := findModelFile("ggml-large-v3-turbo.bin"); err == nil {
 		return p, nil
@@ -453,7 +411,6 @@ func findFinalModel() (string, error) {
 	return findLiveModel()
 }
 
-// runWhisper runs whisper-cli and returns the timestamped transcript from stdout.
 func runWhisper(bin, model, audio string) (string, error) {
 	cmd := exec.Command(bin, "-m", model, "-f", audio, "-l", "auto")
 	cmd.Stderr = io.Discard
@@ -464,7 +421,6 @@ func runWhisper(bin, model, audio string) (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
-// saveTranscript writes the transcript to ~/.lay/transcripts/<session>.md.
 func saveTranscript(recordingDir, transcript string) error {
 	dir := filepath.Join(layDir(), "transcripts")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
