@@ -11,11 +11,21 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
 const liveChunkInterval = 30 * time.Second
+const liveChunkQueueSize = 2
+const captureEventPollInterval = 2 * time.Second
+const maxLiveSegments = 200
+const maxLiveChars = 120000
+
+type liveChunkJob struct {
+	micPath string
+	seq     int
+}
 
 func (a *App) StartRecording() (string, error) {
 	a.currentTranscript = ""
@@ -30,6 +40,11 @@ func (a *App) StartRecording() (string, error) {
 	}
 	if err := StartCapture(dir); err != nil {
 		return "", err
+	}
+	for {
+		if _, ok := ConsumeCaptureEvent(); !ok {
+			break
+		}
 	}
 
 	liveCtx, cancel := context.WithCancel(a.ctx)
@@ -83,14 +98,26 @@ func (a *App) Transcribe(recordingDir string) (string, error) {
 // liveTranscribeLoop rotates the live mic chunk every liveChunkInterval,
 // converts each completed chunk and runs whisper for the live preview.
 func (a *App) liveTranscribeLoop(ctx context.Context, dir string) {
-	ticker := time.NewTicker(liveChunkInterval)
-	defer ticker.Stop()
+	chunkTicker := time.NewTicker(liveChunkInterval)
+	defer chunkTicker.Stop()
+	eventTicker := time.NewTicker(captureEventPollInterval)
+	defer eventTicker.Stop()
+
+	jobs := make(chan liveChunkJob, liveChunkQueueSize)
+	go func() {
+		for job := range jobs {
+			a.processChunk(job.micPath, job.seq)
+		}
+	}()
 
 	for {
 		select {
 		case <-ctx.Done():
+			close(jobs)
 			return
-		case <-ticker.C:
+		case <-eventTicker.C:
+			a.emitCaptureEvents()
+		case <-chunkTicker.C:
 			a.liveMu.Lock()
 			seq := a.liveChunkSeq
 			a.liveChunkSeq++
@@ -98,10 +125,20 @@ func (a *App) liveTranscribeLoop(ctx context.Context, dir string) {
 
 			newMic := filepath.Join(dir, fmt.Sprintf("chunk-%d.caf", seq+1))
 			if err := RotateChunk(newMic); err != nil {
+				runtime.EventsEmit(a.ctx, "recording:warning",
+					"Live chunk rotation failed; recording continues but live transcript may skip updates.")
 				continue
 			}
 			oldMic := filepath.Join(dir, fmt.Sprintf("chunk-%d.caf", seq))
-			go a.processChunk(oldMic, seq)
+			job := liveChunkJob{micPath: oldMic, seq: seq}
+			select {
+			case jobs <- job:
+			default:
+				os.Remove(oldMic)
+				os.Remove(chunkSysPath(oldMic))
+				runtime.EventsEmit(a.ctx, "recording:warning",
+					"Live transcription is falling behind; skipped one chunk to keep recording stable.")
+			}
 		}
 	}
 }
@@ -120,10 +157,7 @@ func (a *App) processChunk(micCaf string, seq int) {
 		return
 	}
 
-	sysCaf := filepath.Join(
-		filepath.Dir(micCaf),
-		strings.Replace(filepath.Base(micCaf), "chunk-", "chunk-sys-", 1),
-	)
+	sysCaf := chunkSysPath(micCaf)
 
 	offsetSecs := float64(seq) * liveChunkInterval.Seconds()
 	text, err := transcribeDual(whisperBin, modelPath, micCaf, sysCaf, offsetSecs)
@@ -133,11 +167,49 @@ func (a *App) processChunk(micCaf string, seq int) {
 		return
 	}
 
-	a.liveMu.Lock()
-	a.liveSegments = append(a.liveSegments, text)
-	a.liveMu.Unlock()
+	a.appendLiveSegment(text)
 
 	runtime.EventsEmit(a.ctx, "transcribe:segment", text)
+}
+
+func (a *App) appendLiveSegment(text string) {
+	a.liveMu.Lock()
+	defer a.liveMu.Unlock()
+
+	a.liveSegments = append(a.liveSegments, text)
+
+	start := 0
+	if len(a.liveSegments) > maxLiveSegments {
+		start = len(a.liveSegments) - maxLiveSegments
+	}
+	totalChars := 0
+	for i := len(a.liveSegments) - 1; i >= start; i-- {
+		totalChars += len(a.liveSegments[i])
+		if totalChars > maxLiveChars {
+			start = i + 1
+			break
+		}
+	}
+	if start > 0 {
+		a.liveSegments = append([]string(nil), a.liveSegments[start:]...)
+	}
+}
+
+func chunkSysPath(micPath string) string {
+	return filepath.Join(
+		filepath.Dir(micPath),
+		strings.Replace(filepath.Base(micPath), "chunk-", "chunk-sys-", 1),
+	)
+}
+
+func (a *App) emitCaptureEvents() {
+	for {
+		msg, ok := ConsumeCaptureEvent()
+		if !ok {
+			return
+		}
+		runtime.EventsEmit(a.ctx, "recording:warning", msg)
+	}
 }
 
 // AppendTranscriptToNotes reads the saved transcript for recordingDir and
@@ -204,6 +276,26 @@ type tsSegment struct {
 	label string // "you" or "them"
 }
 
+// isWhisperHallucination returns true for segments Whisper emits during silence
+// instead of real speech: bracketed non-speech tokens like [Music], [Applause],
+// [música de fundo], [sons de futebol], and text that contains no letters or
+// digits at all (bare symbols such as ♪ ♫ …).
+func isWhisperHallucination(text string) bool {
+	t := strings.TrimSpace(text)
+	// Bracketed tokens: the entire text is wrapped in [...].
+	// Whisper uses these for non-speech events in whatever language it detected.
+	if strings.HasPrefix(t, "[") && strings.HasSuffix(t, "]") {
+		return true
+	}
+	// Pure symbol runs: no letter or digit anywhere in the segment.
+	for _, r := range t {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			return false
+		}
+	}
+	return true
+}
+
 func parseSegments(raw, label string) []tsSegment {
 	var segs []tsSegment
 	for _, line := range strings.Split(raw, "\n") {
@@ -217,7 +309,7 @@ func parseSegments(raw, label string) []tsSegment {
 		}
 		meta := line[1:idx] // "00:00:01.000 --> 00:00:04.000"
 		text := strings.TrimSpace(line[idx+1:])
-		if text == "" {
+		if text == "" || isWhisperHallucination(text) {
 			continue
 		}
 		parts := strings.SplitN(meta, " --> ", 2)
@@ -269,7 +361,12 @@ func deduplicateSegments(segs []tsSegment) []tsSegment {
 	for _, s := range segs {
 		dup := false
 		for i := len(out) - 1; i >= 0 && s.start-out[i].start <= dupWindow; i-- {
-			if out[i].label == s.label && strings.EqualFold(strings.TrimSpace(out[i].text), strings.TrimSpace(s.text)) {
+			// Deduplicate across speakers too: when there are no headphones the
+			// built-in mic acoustically picks up system audio from the speakers,
+			// causing the same speech to appear in both the "you" and "them"
+			// streams.  Segments are sorted by start time so the SCStream copy
+			// ("them") arrives first and the mic echo ("you") is dropped here.
+			if strings.EqualFold(strings.TrimSpace(out[i].text), strings.TrimSpace(s.text)) {
 				dup = true
 				break
 			}

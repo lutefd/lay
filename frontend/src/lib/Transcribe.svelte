@@ -15,10 +15,12 @@
   let recordingDir = $state('');
   let transcript = $state('');
   let liveText = $state('');
+  let warning = $state('');
   let elapsed = $state(0);
   let error = $state('');
   let intervalId: ReturnType<typeof setInterval> | null = null;
   let liveEl = $state<HTMLDivElement | undefined>(undefined);
+  const maxLiveTextChars = 120000;
 
   $effect(() => {
     if (liveText && liveEl) {
@@ -30,6 +32,7 @@
     error = '';
     transcript = '';
     liveText = '';
+    warning = '';
     state = 'recording';
     elapsed = 0;
     onRecordingChange?.(true);
@@ -37,6 +40,12 @@
 
     EventsOn('transcribe:segment', (segment: string) => {
       liveText = liveText ? liveText + '\n' + segment : segment;
+      if (liveText.length > maxLiveTextChars) {
+        liveText = liveText.slice(liveText.length - maxLiveTextChars);
+      }
+    });
+    EventsOn('recording:warning', (msg: string) => {
+      warning = msg;
     });
 
     try {
@@ -45,6 +54,7 @@
       clearInterval(intervalId!);
       intervalId = null;
       EventsOff('transcribe:segment');
+      EventsOff('recording:warning');
       error = e instanceof Error ? e.message : String(e);
       state = 'idle';
       onRecordingChange?.(false);
@@ -53,6 +63,7 @@
 
   async function stop() {
     EventsOff('transcribe:segment');
+    EventsOff('recording:warning');
     if (intervalId) { clearInterval(intervalId); intervalId = null; }
     state = 'stopping';
     try {
@@ -118,6 +129,9 @@
           <p class="live-waiting">Transcript will appear after the first 30s…</p>
         {/if}
       </div>
+      {#if warning}
+        <p class="warning">{warning}</p>
+      {/if}
 
       <button class="record-btn stop" onclick={stop}>Stop</button>
 
@@ -234,6 +248,14 @@
   .error {
     font-size: 11px;
     color: #e05252;
+    text-align: center;
+    margin: 0;
+    max-width: 340px;
+  }
+
+  .warning {
+    font-size: 11px;
+    color: rgba(255, 196, 117, 0.95);
     text-align: center;
     margin: 0;
     max-width: 340px;

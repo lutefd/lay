@@ -288,12 +288,32 @@ static dispatch_queue_t    _audioWriteQ    = nil;
 static char               *_sysFilePath    = NULL; // malloc'd, owned here
 static BOOL                _sysFileReady   = NO;   // file created on first callback
 static BOOL                _isRecording    = NO;
+static char               *_captureEvent   = NULL; // malloc'd, consumed by Go
 static AudioDeviceID       _savedDefaultOutput = kAudioObjectUnknown;
 static AudioDeviceID       _aggOutputDevice    = kAudioObjectUnknown;
+static id                  _engineConfigObserver = nil;
 
 API_AVAILABLE(macos(13.0))
 @interface LaySCStreamDelegate : NSObject <SCStreamOutput, SCStreamDelegate>
 @end
+
+static void setCaptureEvent(NSString *message) {
+    if (_captureEvent) {
+        free(_captureEvent);
+        _captureEvent = NULL;
+    }
+    const char *utf8 = (message && message.length > 0)
+        ? message.UTF8String
+        : "system audio capture stopped";
+    _captureEvent = strdup(utf8);
+}
+
+static char *consumeCaptureEvent(void) {
+    if (!_captureEvent) return NULL;
+    char *out = _captureEvent;
+    _captureEvent = NULL;
+    return out;
+}
 
 API_AVAILABLE(macos(13.0))
 @implementation LaySCStreamDelegate
@@ -389,6 +409,13 @@ API_AVAILABLE(macos(13.0))
 }
 
 - (void)stream:(SCStream *)stream didStopWithError:(NSError *)error {
+    NSString *msg = @"System audio capture stopped.";
+    if (error.localizedDescription.length > 0) {
+        msg = [NSString stringWithFormat:@"System audio capture stopped: %@",
+               error.localizedDescription];
+    }
+    setCaptureEvent(msg);
+
     if (_sysExtFile) {
         ExtAudioFileDispose(_sysExtFile);
         _sysExtFile = NULL;
@@ -728,6 +755,42 @@ static void restoreOutputDevice(void) {
     _aggOutputDevice    = kAudioObjectUnknown;
 }
 
+// restartMicCapture re-pins AVAudioEngine to the built-in mic and restarts it
+// after an AVAudioEngineConfigurationChangeNotification.  macOS automatically
+// stops the engine and removes all taps before posting that notification, so
+// we only need to re-install the tap and restart.  Called when the user plugs
+// in or unplugs headphones while a recording is in progress.
+static void restartMicCapture(void) {
+    if (!_audioEngine || !_isRecording || !_micAudioFile) return;
+
+    AVAudioInputNode *inputNode = [_audioEngine inputNode];
+
+    // Re-pin to the built-in mic so switching to headphones doesn't activate
+    // the HFP profile, which would degrade sample rate for the whole session.
+    AudioDeviceID builtIn = builtInInputDevice();
+    if (builtIn != kAudioObjectUnknown) {
+        AudioUnitSetProperty(inputNode.audioUnit,
+            kAudioOutputUnitProperty_CurrentDevice,
+            kAudioUnitScope_Global, 0,
+            &builtIn, sizeof(builtIn));
+    }
+
+    _micRecordingFmt = [inputNode outputFormatForBus:0];
+
+    // Re-install the tap — system has already removed it.
+    [inputNode installTapOnBus:0 bufferSize:4096 format:_micAudioFile.processingFormat
+                         block:^(AVAudioPCMBuffer *buf, AVAudioTime *when) {
+        if (_micAudioFile) [_micAudioFile writeFromBuffer:buf error:nil];
+        if (_chunkMicFile) [_chunkMicFile writeFromBuffer:buf error:nil];
+    }];
+
+    NSError *engErr = nil;
+    [_audioEngine startAndReturnError:&engErr];
+    if (engErr) {
+        NSLog(@"[lay] mic restart after device change failed: %@", engErr);
+    }
+}
+
 // startCapture starts both mic and system audio capture into outDir.
 // Returns NULL on success, or a malloc'd C string with the error message.
 static const char *startCapture(const char *outDir) {
@@ -811,6 +874,18 @@ static const char *startCapture(const char *outDir) {
         _micAudioFile = nil;
         return strdup(engErr.localizedDescription.UTF8String);
     }
+
+    // Watch for hardware changes (e.g. plugging in / unplugging headphones).
+    // AVAudioEngine stops itself and removes all taps before posting this
+    // notification; restartMicCapture() re-installs the tap and restarts so
+    // recording continues uninterrupted.
+    _engineConfigObserver = [[NSNotificationCenter defaultCenter]
+        addObserverForName:AVAudioEngineConfigurationChangeNotification
+                    object:_audioEngine
+                     queue:[NSOperationQueue mainQueue]
+                usingBlock:^(NSNotification *note) {
+        restartMicCapture();
+    }];
 
     // ── System audio via ScreenCaptureKit (macOS 13+) ────────────────────────
 
@@ -903,6 +978,11 @@ static void stopCapture(void) {
     if (!_isRecording) return;
     _isRecording = NO;
 
+    if (_engineConfigObserver) {
+        [[NSNotificationCenter defaultCenter] removeObserver:_engineConfigObserver];
+        _engineConfigObserver = nil;
+    }
+
     if (_audioEngine) {
         [[_audioEngine inputNode] removeTapOnBus:0];
         [_audioEngine stop];
@@ -937,6 +1017,7 @@ static void stopCapture(void) {
     _sysFileReady       = NO;
     _sysNativeAsbdValid = NO;
     _audioWriteQ        = nil;
+    if (_captureEvent) { free(_captureEvent); _captureEvent = NULL; }
 
     restoreOutputDevice();
 }
@@ -1012,3 +1093,12 @@ func RotateChunk(newMicPath string) error {
 	return nil
 }
 
+// ConsumeCaptureEvent returns the next native capture warning, if any.
+func ConsumeCaptureEvent() (string, bool) {
+	cs := C.consumeCaptureEvent()
+	if cs == nil {
+		return "", false
+	}
+	defer C.free(unsafe.Pointer(cs))
+	return C.GoString(cs), true
+}
