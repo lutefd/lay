@@ -2,10 +2,12 @@
   import { onMount } from 'svelte';
   import { GetNotes, SaveNotes } from '../../wailsjs/go/main/App.js';
   import Markdown from './Markdown.svelte';
+  import ExportDialog from './ExportDialog.svelte';
 
   let content = $state('');
   let status = $state<'idle' | 'saving' | 'saved' | 'error'>('idle');
   let mode = $state<'edit' | 'preview'>('edit');
+  let showExport = $state(false);
   let saveTimer: ReturnType<typeof setTimeout> | null = null;
 
   onMount(async () => {
@@ -32,6 +34,10 @@
   function copyRaw() {
     navigator.clipboard.writeText(content);
   }
+
+  function exportNotes() {
+    showExport = true;
+  }
 </script>
 
 <div class="notes-panel">
@@ -45,6 +51,7 @@
       {#if mode === 'preview'}
         <button class="action-btn" onclick={copyRaw} title="Copy raw markdown">Copy md</button>
       {/if}
+      <button class="action-btn" onclick={exportNotes} title="Export to .md file">Export</button>
       <span class="save-status">
         {#if status === 'saving'}
           <span class="dot saving"></span> saving…
@@ -73,6 +80,10 @@
         <p class="empty-hint">Nothing here yet — switch to Edit to write notes.</p>
       {/if}
     </div>
+  {/if}
+
+  {#if showExport}
+    <ExportDialog content={content} defaultName="notes.md" onClose={() => (showExport = false)} />
   {/if}
 </div>
 
@@ -150,7 +161,6 @@
     gap: 4px;
     font-size: 11px;
     color: rgba(255, 255, 255, 0.3);
-    min-width: 60px;
   }
 
   .dot {

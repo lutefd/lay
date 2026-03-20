@@ -1,5 +1,6 @@
 <script lang="ts">
   import { AppendTranscriptToNotes } from '../../wailsjs/go/main/App.js';
+  import ExportDialog from './ExportDialog.svelte';
 
   interface Props {
     text: string;
@@ -10,6 +11,7 @@
   let { text, recordingDir, onNew }: Props = $props();
 
   let appended = $state(false);
+  let showExport = $state(false);
   let error = $state('');
 
   async function appendToNotes() {
@@ -20,12 +22,17 @@
       error = e instanceof Error ? e.message : String(e);
     }
   }
+
+  function exportTranscript() {
+    showExport = true;
+  }
 </script>
 
 <div class="transcript">
   <div class="header">
     <span class="label">Transcript</span>
     <div class="actions">
+      <button class="btn secondary" onclick={exportTranscript}>Export</button>
       <button
         class="btn"
         class:success={appended}
@@ -45,6 +52,10 @@
   <div class="scroll">
     <pre class="text">{text}</pre>
   </div>
+
+  {#if showExport}
+    <ExportDialog content={text} defaultName="transcript.md" onClose={() => (showExport = false)} />
+  {/if}
 </div>
 
 <style>
