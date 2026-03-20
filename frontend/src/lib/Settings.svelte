@@ -1,29 +1,79 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { GetConfig, SaveConfig } from '../../wailsjs/go/main/App.js';
+  import { GetConfig, GetGatewayConfig, SaveConfig } from '../../wailsjs/go/main/App.js';
+  import type { app } from '../../wailsjs/go/models';
+
+  const defaultModel = 'claude-sonnet-4-6';
+  const baseModelGroups: { label: string; options: { value: string; label: string }[] }[] = [
+    {
+      label: 'Anthropic',
+      options: [
+        { value: 'claude-haiku-4-5-20251001', label: 'Haiku 4.5 — fast' },
+        { value: 'claude-sonnet-4-6', label: 'Sonnet 4.6 — recommended' },
+        { value: 'claude-opus-4-6', label: 'Opus 4.6 — most capable' },
+      ],
+    },
+    {
+      label: 'OpenAI',
+      options: [
+        { value: 'gpt-5-nano', label: 'GPT-5 nano — fastest' },
+        { value: 'gpt-5-mini', label: 'GPT-5 mini — fast' },
+        { value: 'gpt-5.1', label: 'GPT-5.1' },
+        { value: 'gpt-5.2', label: 'GPT-5.2' },
+        { value: 'gpt-5.2-chat-latest', label: 'GPT-5.2 chat latest' },
+      ],
+    },
+  ];
+
+  const transcribeLangs = [
+    { value: '',   label: 'Auto-detect' },
+    { value: 'pt', label: 'Portuguese' },
+    { value: 'es', label: 'Spanish' },
+    { value: 'en', label: 'English' },
+    { value: 'fr', label: 'French' },
+    { value: 'de', label: 'German' },
+    { value: 'it', label: 'Italian' },
+    { value: 'zh', label: 'Chinese' },
+    { value: 'ja', label: 'Japanese' },
+  ] as const;
 
   let anthropicKey = $state('');
   let openaiKey = $state('');
-  let model = $state('claude-sonnet-4-6');
-  let status = $state<'idle' | 'saving' | 'saved' | 'error'>('idle');
+  let model = $state(defaultModel);
+  let gatewayURL = $state('');
+  let transcribeLang = $state('');
   let showAnthropic = $state(false);
   let showOpenAI = $state(false);
+  let gwConfig = $state<app.GatewayConfig | null>(null);
+
+  let modelGroups = $derived([
+    ...baseModelGroups,
+    ...(gwConfig ? [{ label: gwConfig.name, options: gwConfig.models }] : []),
+  ]);
+  let supportedModels = $derived(new Set(modelGroups.flatMap((group) => group.options.map((option) => option.value))));
+
+  function normalizeModel(value: string | undefined): string {
+    if (!value || !supportedModels.has(value)) {
+      return defaultModel;
+    }
+    return value;
+  }
 
   onMount(async () => {
+    gwConfig = await GetGatewayConfig();
     const cfg = await GetConfig();
     anthropicKey = cfg.anthropicKey ?? '';
     openaiKey = cfg.openaiKey ?? '';
-    model = cfg.model ?? 'claude-sonnet-4-6';
+    model = normalizeModel(cfg.model);
+    gatewayURL = cfg.gatewayURL ?? '';
+    transcribeLang = cfg.transcribeLang ?? '';
   });
 
   async function save() {
-    status = 'saving';
     try {
-      await SaveConfig(anthropicKey.trim(), openaiKey.trim(), model);
-      status = 'saved';
-      setTimeout(() => (status = 'idle'), 2000);
+      await SaveConfig(anthropicKey.trim(), openaiKey.trim(), normalizeModel(model), gatewayURL, transcribeLang);
     } catch {
-      status = 'error';
+      // ignore
     }
   }
 </script>
@@ -36,9 +86,9 @@
     <span class="field-label">Anthropic API Key</span>
     <div class="key-row">
       {#if showAnthropic}
-        <input type="text"     class="field-input" bind:value={anthropicKey} placeholder="sk-ant-…" autocomplete="off" spellcheck={false} />
+        <input type="text"     class="field-input" bind:value={anthropicKey} placeholder="sk-ant-…" autocomplete="off" spellcheck={false} onblur={save} />
       {:else}
-        <input type="password" class="field-input" bind:value={anthropicKey} placeholder="sk-ant-…" autocomplete="off" />
+        <input type="password" class="field-input" bind:value={anthropicKey} placeholder="sk-ant-…" autocomplete="off" onblur={save} />
       {/if}
       <button class="toggle-btn" onclick={() => (showAnthropic = !showAnthropic)}>
         {showAnthropic ? 'hide' : 'show'}
@@ -51,9 +101,9 @@
     <span class="field-label">OpenAI API Key</span>
     <div class="key-row">
       {#if showOpenAI}
-        <input type="text"     class="field-input" bind:value={openaiKey} placeholder="sk-proj-…" autocomplete="off" spellcheck={false} />
+        <input type="text"     class="field-input" bind:value={openaiKey} placeholder="sk-proj-…" autocomplete="off" spellcheck={false} onblur={save} />
       {:else}
-        <input type="password" class="field-input" bind:value={openaiKey} placeholder="sk-proj-…" autocomplete="off" />
+        <input type="password" class="field-input" bind:value={openaiKey} placeholder="sk-proj-…" autocomplete="off" onblur={save} />
       {/if}
       <button class="toggle-btn" onclick={() => (showOpenAI = !showOpenAI)}>
         {showOpenAI ? 'hide' : 'show'}
@@ -61,34 +111,65 @@
     </div>
   </label>
 
+  <!-- Gateway -->
+  {#if gwConfig}
+  <div class="field">
+    <span class="field-label">{gwConfig.name}</span>
+    <div class="gateway-row">
+      <button
+        type="button"
+        class="gateway-toggle"
+        class:active={gatewayURL !== ''}
+        onclick={() => { gatewayURL = gatewayURL !== '' ? '' : gwConfig!.url; save(); }}
+      >
+        {gatewayURL !== '' ? 'Enabled' : 'Disabled'}
+      </button>
+    </div>
+    <p class="gateway-hint">Route all requests through {gwConfig.name}. No API key required.</p>
+  </div>
+  {/if}
+
   <!-- Model -->
   <label class="field">
     <span class="field-label">Model</span>
-    <select class="field-select" bind:value={model}>
-      <optgroup label="Anthropic">
-        <option value="claude-haiku-4-5-20251001">Haiku 4.5 — fast</option>
-        <option value="claude-sonnet-4-6">Sonnet 4.6 — recommended</option>
-        <option value="claude-opus-4-6">Opus 4.6 — most capable</option>
-      </optgroup>
-      <optgroup label="OpenAI">
-        <option value="gpt-5-nano">GPT-5 nano — fastest</option>
-        <option value="gpt-5-mini">GPT-5 mini — fast</option>
-        <option value="gpt-5.1">GPT-5.1</option>
-        <option value="gpt-5.2">GPT-5.2</option>
-        <option value="gpt-5.2-chat-latest">GPT-5.2 chat latest</option>
-      </optgroup>
-    </select>
+    <div class="model-picker">
+      {#each modelGroups as group}
+        <div class="model-group">
+          <p class="model-group-label">{group.label}</p>
+          <div class="model-options">
+            {#each group.options as option}
+              <button
+                type="button"
+                class="model-option"
+                class:selected={model === option.value}
+                onclick={() => { model = option.value; save(); }}
+              >
+                {option.label}
+              </button>
+            {/each}
+          </div>
+        </div>
+      {/each}
+    </div>
   </label>
 
-  <div class="actions">
-    <button class="save-btn" onclick={save} disabled={status === 'saving'}>
-      {#if status === 'saving'}Saving…
-      {:else if status === 'saved'}Saved ✓
-      {:else if status === 'error'}Error — retry
-      {:else}Save
-      {/if}
-    </button>
-  </div>
+  <!-- Transcription language -->
+  <label class="field">
+    <span class="field-label">Transcription Language</span>
+    <div class="model-options">
+      {#each transcribeLangs as lang}
+        <button
+          type="button"
+          class="model-option"
+          class:selected={transcribeLang === lang.value}
+          onclick={() => { transcribeLang = lang.value; save(); }}
+        >
+          {lang.label}
+        </button>
+      {/each}
+    </div>
+    <p class="gateway-hint">Force Whisper to a specific language to avoid misdetection between similar languages (e.g. Portuguese vs Spanish).</p>
+  </label>
 
   <p class="hint">
     Anthropic: <strong>console.anthropic.com</strong><br/>
@@ -168,48 +249,53 @@
     background: rgba(255, 255, 255, 0.1);
   }
 
-  .field-select {
+  .model-picker {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .model-group {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .model-group-label {
+    margin: 0;
+    font-size: 10px;
+    color: rgba(255, 255, 255, 0.35);
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+  }
+
+  .model-options {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+
+  .model-option {
     background: rgba(255, 255, 255, 0.06);
     border: 1px solid rgba(255, 255, 255, 0.1);
     border-radius: 7px;
-    color: rgba(255, 255, 255, 0.87);
+    color: rgba(255, 255, 255, 0.75);
     font-family: inherit;
-    font-size: 13px;
+    font-size: 12px;
     padding: 6px 10px;
-    outline: none;
     cursor: pointer;
-    appearance: auto;
+    transition: border-color 0.15s, color 0.15s, background 0.15s;
   }
 
-  .field-select :global(optgroup) {
-    color: rgba(255, 255, 255, 0.5);
-    font-size: 11px;
+  .model-option:hover {
+    border-color: rgba(124, 158, 245, 0.45);
+    color: rgba(255, 255, 255, 0.9);
   }
 
-  .actions {
-    display: flex;
-    justify-content: flex-start;
-  }
-
-  .save-btn {
+  .model-option.selected {
     background: rgba(124, 158, 245, 0.2);
-    border: 1px solid rgba(124, 158, 245, 0.35);
-    border-radius: 7px;
-    color: #7c9ef5;
-    font-family: inherit;
-    font-size: 13px;
-    padding: 7px 20px;
-    cursor: pointer;
-    transition: background 0.15s, opacity 0.15s;
-  }
-
-  .save-btn:hover:not(:disabled) {
-    background: rgba(124, 158, 245, 0.35);
-  }
-
-  .save-btn:disabled {
-    opacity: 0.6;
-    cursor: default;
+    border-color: rgba(124, 158, 245, 0.45);
+    color: #8cabff;
   }
 
   .hint {
@@ -224,5 +310,46 @@
     border-radius: 3px;
     padding: 1px 4px;
     font-family: monospace;
+  }
+
+  .gateway-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .gateway-toggle {
+    background: rgba(255, 255, 255, 0.06);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 7px;
+    color: rgba(255, 255, 255, 0.45);
+    font-size: 12px;
+    font-family: inherit;
+    padding: 5px 12px;
+    cursor: pointer;
+    transition: color 0.15s, background 0.15s, border-color 0.15s;
+  }
+
+  .gateway-toggle.active {
+    background: rgba(52, 199, 89, 0.15);
+    border-color: rgba(52, 199, 89, 0.4);
+    color: #34c759;
+  }
+
+  .gateway-toggle:hover {
+    color: rgba(255, 255, 255, 0.8);
+    background: rgba(255, 255, 255, 0.1);
+  }
+
+  .gateway-toggle.active:hover {
+    background: rgba(52, 199, 89, 0.25);
+    color: #4cd964;
+  }
+
+  .gateway-hint {
+    margin: 0;
+    font-size: 10px;
+    color: rgba(255, 255, 255, 0.28);
+    line-height: 1.5;
   }
 </style>
