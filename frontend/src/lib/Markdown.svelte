@@ -1,3 +1,20 @@
+<script module lang="ts">
+  import mermaid from 'mermaid';
+  mermaid.initialize({
+    startOnLoad: false,
+    theme: 'dark',
+    themeVariables: {
+      background: 'transparent',
+      primaryColor: '#2a2d3e',
+      primaryTextColor: 'rgba(255,255,255,0.87)',
+      primaryBorderColor: 'rgba(255,255,255,0.15)',
+      lineColor: 'rgba(255,255,255,0.4)',
+      secondaryColor: '#1c1c28',
+      tertiaryColor: '#1a1a2e',
+    },
+  });
+</script>
+
 <script lang="ts">
   import { marked } from 'marked';
   import { BrowserOpenURL } from '../../wailsjs/runtime/runtime.js';
@@ -11,11 +28,43 @@
 
   let { raw, copyRaw = false, class: className = '' }: Props = $props();
 
+  let container = $state<HTMLDivElement | undefined>(undefined);
+  let renderSeq = 0;
+
   // marked.parse is sync when no async extensions are configured.
   let html = $derived(marked.parse(raw) as string);
 
+  $effect(() => {
+    void html; // track html changes → re-run after DOM updates
+    if (!container) return;
+
+    const seq = ++renderSeq;
+    const blocks = container.querySelectorAll<HTMLElement>('pre > code.language-mermaid');
+    if (!blocks.length) return;
+
+    blocks.forEach(async (block) => {
+      if (seq !== renderSeq) return;
+      const code = block.textContent ?? '';
+      const pre = block.parentElement;
+      if (!pre) return;
+      try {
+        const id = `mmd-${seq}-${Math.random().toString(36).slice(2)}`;
+        const { svg } = await mermaid.render(id, code);
+        if (seq !== renderSeq) return; // stale after await
+        const wrap = document.createElement('div');
+        wrap.className = 'mermaid-diagram';
+        wrap.innerHTML = svg;
+        pre.replaceWith(wrap);
+      } catch {
+        // leave as code block if diagram fails to parse
+      }
+    });
+  });
+
   function handleCopy(e: ClipboardEvent) {
     if (!copyRaw) return;
+    // If the user has selected text, let the browser copy the selection normally.
+    if (window.getSelection()?.toString()) return;
     e.preventDefault();
     e.clipboardData?.setData('text/plain', raw);
   }
@@ -36,7 +85,7 @@
 </script>
 
 <!-- svelte-ignore a11y_no_static_element_interactions -->
-<div class="md {className}" oncopy={handleCopy} onclick={handleClick}>
+<div class="md {className}" bind:this={container} oncopy={handleCopy} onclick={handleClick}>
   {@html html}
 </div>
 
@@ -156,4 +205,19 @@
   /* --- Strong / em --- */
   .md :global(strong) { color: #fff; font-weight: 600; }
   .md :global(em) { color: rgba(255, 255, 255, 0.75); }
+
+  /* --- Mermaid diagrams --- */
+  .md :global(.mermaid-diagram) {
+    margin: 0.8em 0;
+    display: flex;
+    justify-content: center;
+    overflow-x: auto;
+  }
+  .md :global(.mermaid-diagram svg) {
+    max-width: 100%;
+    background: transparent !important;
+  }
+  .md :global(.mermaid-diagram svg .background) {
+    fill: transparent !important;
+  }
 </style>

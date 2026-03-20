@@ -2,6 +2,7 @@
 *::before,
 *::after {
   box-sizing: border-box;
+  cursor: default !important;
 }
 
 html,
@@ -23,8 +24,8 @@ body {
   --window-radius: 6px;
 }
 
-/* Allow text selection inside inputs and textareas */
-input, textarea, [contenteditable] {
+/* Allow text selection inside inputs, textareas, and readable content */
+input, textarea, [contenteditable], .bubble, .error-banner, .error {
   user-select: text;
 }
 

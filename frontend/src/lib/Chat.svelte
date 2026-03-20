@@ -14,14 +14,50 @@
   let loading = $state(false);
   let error = $state('');
   let messagesEl = $state<HTMLElement | null>(null);
+  let pendingImages = $state<string[]>([]);
+
+  function fileToBase64(file: File): Promise<string> {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const result = reader.result as string;
+        // strip the data:image/...;base64, prefix
+        resolve(result.replace(/^data:image\/[^;]+;base64,/, ''));
+      };
+      reader.onerror = reject;
+      reader.readAsDataURL(file);
+    });
+  }
+
+  function onPaste(e: ClipboardEvent) {
+    const items = e.clipboardData?.items;
+    if (!items) return;
+    for (const item of items) {
+      if (item.type.startsWith('image/')) {
+        e.preventDefault();
+        const file = item.getAsFile();
+        if (!file) continue;
+        fileToBase64(file).then((b64) => {
+          pendingImages = [...pendingImages, b64];
+        });
+      }
+    }
+  }
+
+  function removePendingImage(index: number) {
+    pendingImages = pendingImages.filter((_, i) => i !== index);
+  }
 
   async function send() {
     const text = input.trim();
-    if (!text || loading) return;
+    if (!text && pendingImages.length === 0) return;
+    if (loading) return;
 
     error = '';
+    const imgs = pendingImages.length > 0 ? [...pendingImages] : undefined;
     input = '';
-    messages = [...messages, { role: 'user', content: text }];
+    pendingImages = [];
+    messages = [...messages, { role: 'user', content: text, images: imgs }];
     loading = true;
 
     await tick();
@@ -88,7 +124,16 @@
             <Markdown raw={msg.content} copyRaw={true} />
           </div>
         {:else}
-          <div class="bubble user-bubble">{msg.content}</div>
+          <div class="bubble user-bubble">
+            {#if msg.images && msg.images.length > 0}
+              <div class="msg-images">
+                {#each msg.images as img}
+                  <img src="data:image/png;base64,{img}" alt="Attached image" class="msg-img" />
+                {/each}
+              </div>
+            {/if}
+            {#if msg.content}{msg.content}{/if}
+          </div>
         {/if}
       </div>
     {/each}
@@ -111,16 +156,28 @@
     {/if}
   </div>
 
+  {#if pendingImages.length > 0}
+    <div class="pending-images">
+      {#each pendingImages as img, i}
+        <div class="pending-thumb">
+          <img src="data:image/png;base64,{img}" alt="Pasted image" />
+          <button class="remove-img" onclick={() => removePendingImage(i)}>×</button>
+        </div>
+      {/each}
+    </div>
+  {/if}
+
   <div class="chat-input-row">
     <textarea
       class="chat-input"
       bind:value={input}
       onkeydown={onKeydown}
-      placeholder="Message… (Enter to send, Shift+Enter for new line)"
+      onpaste={onPaste}
+      placeholder="Message… (Enter to send, Ctrl+V to paste image)"
       rows={2}
       disabled={loading}
     ></textarea>
-    <button class="send-btn" onclick={send} disabled={loading || !input.trim()}>
+    <button class="send-btn" onclick={send} disabled={loading || (!input.trim() && pendingImages.length === 0)}>
       {loading ? '…' : '↑'}
     </button>
   </div>
@@ -132,6 +189,8 @@
     flex-direction: column;
     flex: 1;
     min-height: 0;
+    min-width: 0;
+    overflow: hidden;
   }
 
   .chat-toolbar {
@@ -148,7 +207,7 @@
     color: rgba(255, 255, 255, 0.3);
     font-size: 11px;
     font-family: inherit;
-    cursor: pointer;
+
     padding: 2px 6px;
     border-radius: 4px;
     transition: color 0.15s, background 0.15s;
@@ -162,11 +221,13 @@
   .messages {
     flex: 1;
     overflow-y: auto;
+    overflow-x: hidden;
     padding: 8px 12px;
     display: flex;
     flex-direction: column;
     gap: 14px;
     scroll-behavior: smooth;
+    min-width: 0;
   }
 
   .messages::-webkit-scrollbar { width: 4px; }
@@ -184,6 +245,7 @@
     display: flex;
     flex-direction: column;
     gap: 4px;
+    min-width: 0;
   }
 
   .msg-header {
@@ -211,7 +273,7 @@
     font-family: inherit;
     padding: 1px 5px;
     border-radius: 3px;
-    cursor: pointer;
+
     transition: color 0.15s, background 0.15s;
     margin-left: auto;
   }
@@ -224,6 +286,8 @@
   .bubble {
     border-radius: 8px;
     padding: 8px 12px;
+    min-width: 0;
+    overflow-wrap: break-word;
   }
 
   .assistant-bubble {
@@ -310,7 +374,7 @@
     color: #7c9ef5;
     font-size: 18px;
     width: 38px;
-    cursor: pointer;
+
     transition: background 0.15s, opacity 0.15s;
     flex-shrink: 0;
     align-self: flex-end;
@@ -322,6 +386,58 @@
 
   .send-btn:disabled {
     opacity: 0.35;
-    cursor: not-allowed;
+  }
+
+  .pending-images {
+    display: flex;
+    gap: 6px;
+    padding: 4px 10px 0;
+    flex-wrap: wrap;
+    flex-shrink: 0;
+  }
+
+  .pending-thumb {
+    position: relative;
+    width: 48px;
+    height: 48px;
+    border-radius: 6px;
+    overflow: hidden;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+  }
+
+  .pending-thumb img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+  }
+
+  .remove-img {
+    position: absolute;
+    top: -1px;
+    right: -1px;
+    background: rgba(0, 0, 0, 0.7);
+    border: none;
+    color: rgba(255, 255, 255, 0.7);
+    font-size: 12px;
+    width: 16px;
+    height: 16px;
+    line-height: 16px;
+    text-align: center;
+    padding: 0;
+    border-radius: 0 5px 0 4px;
+  }
+
+  .msg-images {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+    margin-bottom: 4px;
+  }
+
+  .msg-img {
+    max-width: 200px;
+    max-height: 150px;
+    border-radius: 6px;
+    object-fit: contain;
   }
 </style>

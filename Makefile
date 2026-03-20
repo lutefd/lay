@@ -19,7 +19,7 @@ WHISPER_DYLIBS := \
 	libggml-metal.0.dylib \
 	libggml-base.0.dylib
 
-.PHONY: build dev clean
+.PHONY: build dev dmg dmg-only clean
 
 build:
 	@echo "→ Building lay…"
@@ -54,6 +54,24 @@ build:
 	done
 	codesign --force --deep --sign - "$(APP_RESOURCES)/whisper-cli"
 	@echo "→ Done. App: $(APP_RESOURCES)/../.."
+
+dmg: build
+	$(MAKE) dmg-only
+
+dmg-only:
+	@command -v create-dmg >/dev/null 2>&1 || { echo "ERROR: create-dmg not found. Run: brew install create-dmg"; exit 1; }
+	@[ -d build/bin/lay.app ] || { echo "ERROR: build/bin/lay.app not found. Run: make build"; exit 1; }
+	@rm -f build/bin/lay.dmg
+	create-dmg \
+	  --volname "lay" \
+	  --window-size 600 300 \
+	  --icon-size 128 \
+	  --icon "lay.app" 150 130 \
+	  --hide-extension "lay.app" \
+	  --app-drop-link 450 130 \
+	  build/bin/lay.dmg \
+	  build/bin/
+	@echo "→ DMG: build/bin/lay.dmg"
 
 dev:
 	wails dev

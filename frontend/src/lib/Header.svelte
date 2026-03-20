@@ -2,11 +2,11 @@
   import { WindowMinimise, Quit } from '../../wailsjs/runtime/runtime.js';
 
   interface Props {
-    activeTab: 'notes' | 'chat' | 'transcribe' | 'settings';
+    activeTab: 'notes' | 'chat' | 'transcribe' | 'voice' | 'settings';
     isRecording?: boolean;
   }
 
-  let { activeTab = $bindable('notes'), isRecording = false }: Props = $props();
+  let { activeTab = $bindable<'notes' | 'chat' | 'transcribe' | 'voice' | 'settings'>('notes'), isRecording = false }: Props = $props();
 </script>
 
 <!-- Entire header is the drag region; only the buttons themselves opt out -->
@@ -31,7 +31,13 @@
       class:active={activeTab === 'transcribe'}
       onclick={() => (activeTab = 'transcribe')}
       style="--wails-draggable: no-drag"
-    >Transcribe{#if isRecording}<span class="rec-dot"></span>{/if}</button>
+    >Transcribe{#if isRecording && activeTab === 'transcribe'}<span class="rec-dot"></span>{/if}</button>
+    <button
+      class="tab-btn"
+      class:active={activeTab === 'voice'}
+      onclick={() => (activeTab = 'voice')}
+      style="--wails-draggable: no-drag"
+    >Voice{#if isRecording && activeTab === 'voice'}<span class="rec-dot"></span>{/if}</button>
     <button
       class="tab-btn"
       class:active={activeTab === 'settings'}

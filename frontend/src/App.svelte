@@ -3,10 +3,11 @@
   import Notes from './lib/Notes.svelte';
   import Chat from './lib/Chat.svelte';
   import Transcribe from './lib/Transcribe.svelte';
+  import Voice from './lib/Voice.svelte';
   import Settings from './lib/Settings.svelte';
   import type { ChatMessage } from './lib/types.js';
 
-  let activeTab = $state<'notes' | 'chat' | 'transcribe' | 'settings'>('notes');
+  let activeTab = $state<'notes' | 'chat' | 'transcribe' | 'voice' | 'settings'>('notes');
   let chatMessages = $state<ChatMessage[]>([]);
   let isRecording = $state(false);
 </script>
@@ -17,14 +18,20 @@
   <main class="content">
     {#if activeTab === 'notes'}
       <Notes />
-    {:else if activeTab === 'chat'}
-      <Chat bind:messages={chatMessages} />
     {:else if activeTab === 'settings'}
       <Settings />
     {/if}
+    <!-- Chat is always mounted so messages survive tab switches -->
+    <div class="chat-slot" class:hidden={activeTab !== 'chat'}>
+      <Chat bind:messages={chatMessages} />
+    </div>
     <!-- Transcribe is always mounted so recording survives tab switches -->
     <div class="transcribe-slot" class:hidden={activeTab !== 'transcribe'}>
       <Transcribe onRecordingChange={(v) => (isRecording = v)} />
+    </div>
+    <!-- Voice is always mounted so recording survives tab switches -->
+    <div class="voice-slot" class:hidden={activeTab !== 'voice'}>
+      <Voice onRecordingChange={(v) => (isRecording = v)} />
     </div>
   </main>
 </div>
@@ -46,11 +53,27 @@
     overflow: hidden;
   }
 
+  .chat-slot {
+    display: contents;
+  }
+
+  .chat-slot.hidden {
+    display: none;
+  }
+
   .transcribe-slot {
     display: contents;
   }
 
   .transcribe-slot.hidden {
+    display: none;
+  }
+
+  .voice-slot {
+    display: contents;
+  }
+
+  .voice-slot.hidden {
     display: none;
   }
 </style>
