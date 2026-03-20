@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"embed"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -11,6 +12,9 @@ import (
 
 	"lay/internal/ai"
 )
+
+//go:embed all:defaults
+var defaults embed.FS
 
 type App struct {
 	ctx               context.Context
@@ -97,7 +101,12 @@ func (a *App) GetConfig() Config {
 }
 
 func (a *App) GetGatewayConfig() *GatewayConfig {
+	// User override: ~/.lay/gateway.json
 	data, err := os.ReadFile(filepath.Join(layDir(), "gateway.json"))
+	if err != nil {
+		// Fall back to build-time embedded default
+		data, err = defaults.ReadFile("defaults/gateway.json")
+	}
 	if err != nil {
 		return nil
 	}

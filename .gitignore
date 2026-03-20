@@ -4,3 +4,4 @@ frontend/dist
 .DS_Store
 build/.DS_Store
 lay
+internal/app/defaults/gateway.json
