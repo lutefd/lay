@@ -4,18 +4,28 @@ import {app} from '../models';
 
 export function AppendTranscriptToNotes(arg1:string):Promise<void>;
 
+export function ExportToFile(arg1:string,arg2:string):Promise<void>;
+
 export function GetConfig():Promise<app.Config>;
+
+export function GetGatewayConfig():Promise<app.GatewayConfig>;
+
+export function GetHomePath():Promise<string>;
 
 export function GetNotes():Promise<string>;
 
-export function SaveConfig(arg1:string,arg2:string,arg3:string):Promise<void>;
+export function SaveConfig(arg1:string,arg2:string,arg3:string,arg4:string,arg5:string):Promise<void>;
 
 export function SaveNotes(arg1:string):Promise<void>;
 
 export function SendMessage(arg1:string):Promise<string>;
+
+export function StartMicOnlyRecording():Promise<string>;
 
 export function StartRecording():Promise<string>;
 
 export function StopRecording():Promise<void>;
 
 export function Transcribe(arg1:string):Promise<string>;
+
+export function TranscribeMicOnly(arg1:string):Promise<string>;

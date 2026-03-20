@@ -6,16 +6,28 @@ export function AppendTranscriptToNotes(arg1) {
   return window['go']['main']['App']['AppendTranscriptToNotes'](arg1);
 }
 
+export function ExportToFile(arg1, arg2) {
+  return window['go']['main']['App']['ExportToFile'](arg1, arg2);
+}
+
 export function GetConfig() {
   return window['go']['main']['App']['GetConfig']();
+}
+
+export function GetGatewayConfig() {
+  return window['go']['main']['App']['GetGatewayConfig']();
+}
+
+export function GetHomePath() {
+  return window['go']['main']['App']['GetHomePath']();
 }
 
 export function GetNotes() {
   return window['go']['main']['App']['GetNotes']();
 }
 
-export function SaveConfig(arg1, arg2, arg3) {
-  return window['go']['main']['App']['SaveConfig'](arg1, arg2, arg3);
+export function SaveConfig(arg1, arg2, arg3, arg4, arg5) {
+  return window['go']['main']['App']['SaveConfig'](arg1, arg2, arg3, arg4, arg5);
 }
 
 export function SaveNotes(arg1) {
@@ -24,6 +36,10 @@ export function SaveNotes(arg1) {
 
 export function SendMessage(arg1) {
   return window['go']['main']['App']['SendMessage'](arg1);
+}
+
+export function StartMicOnlyRecording() {
+  return window['go']['main']['App']['StartMicOnlyRecording']();
 }
 
 export function StartRecording() {
@@ -36,4 +52,8 @@ export function StopRecording() {
 
 export function Transcribe(arg1) {
   return window['go']['main']['App']['Transcribe'](arg1);
+}
+
+export function TranscribeMicOnly(arg1) {
+  return window['go']['main']['App']['TranscribeMicOnly'](arg1);
 }
