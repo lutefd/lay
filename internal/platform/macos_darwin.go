@@ -16,7 +16,7 @@ package platform
 #import <CoreMedia/CoreMedia.h>
 #import <ScreenCaptureKit/ScreenCaptureKit.h>
 
-static EventHotKeyRef  _hotKeyRefs[5]    = { NULL };
+static EventHotKeyRef  _hotKeyRefs[9]    = { NULL };
 static EventHandlerRef _hotKeyHandlerRef = NULL;
 static id _localKeyMonitor = nil;
 static Class _layPanelClass = nil;
@@ -170,10 +170,10 @@ static OSStatus hotkeyPressed(EventHandlerCallRef next, EventRef event, void *da
     dispatch_async(dispatch_get_main_queue(), ^{
         switch (hkID.id) {
             case 1: toggleWindow(); break;
-            case 2: setWindowOpacity(1.0); break;
-            case 3: setWindowOpacity(0.75); break;
-            case 4: setWindowOpacity(0.5); break;
-            case 5: setWindowOpacity(0.25); break;
+            case 2: case 6: setWindowOpacity(1.0); break;
+            case 3: case 7: setWindowOpacity(0.75); break;
+            case 4: case 8: setWindowOpacity(0.5); break;
+            case 5: case 9: setWindowOpacity(0.25); break;
             default: break;
         }
     });
@@ -196,6 +196,7 @@ static void setAccessoryPolicy() {
     });
 }
 
+
 static void registerGlobalHotkey() {
     dispatch_async(dispatch_get_main_queue(), ^{
         // Install handler for kEventHotKeyPressed on the application target.
@@ -210,7 +211,7 @@ static void registerGlobalHotkey() {
         RegisterEventHotKey(kVK_ANSI_L, cmdKey | shiftKey, hkID,
                             GetApplicationEventTarget(), 0, &_hotKeyRefs[0]);
 
-        // Opacity: ⌘+⌥+1/2/3/4.
+        // Opacity: ⌘+⌥+1/2/3/4 (primary) and ⌃+⇧+1/2/3/4 (secondary).
         hkID.id = 2;
         RegisterEventHotKey(kVK_ANSI_1, cmdKey | optionKey, hkID,
                             GetApplicationEventTarget(), 0, &_hotKeyRefs[1]);
@@ -223,6 +224,20 @@ static void registerGlobalHotkey() {
         hkID.id = 5;
         RegisterEventHotKey(kVK_ANSI_4, cmdKey | optionKey, hkID,
                             GetApplicationEventTarget(), 0, &_hotKeyRefs[4]);
+
+        // Secondary opacity: ⌃+⇧+1/2/3/4.
+        hkID.id = 6;
+        RegisterEventHotKey(kVK_ANSI_1, controlKey | shiftKey, hkID,
+                            GetApplicationEventTarget(), 0, &_hotKeyRefs[5]);
+        hkID.id = 7;
+        RegisterEventHotKey(kVK_ANSI_2, controlKey | shiftKey, hkID,
+                            GetApplicationEventTarget(), 0, &_hotKeyRefs[6]);
+        hkID.id = 8;
+        RegisterEventHotKey(kVK_ANSI_3, controlKey | shiftKey, hkID,
+                            GetApplicationEventTarget(), 0, &_hotKeyRefs[7]);
+        hkID.id = 9;
+        RegisterEventHotKey(kVK_ANSI_4, controlKey | shiftKey, hkID,
+                            GetApplicationEventTarget(), 0, &_hotKeyRefs[8]);
     });
 }
 
@@ -262,7 +277,7 @@ static void unregisterLocalKeyMonitor() {
 
 static void unregisterGlobalHotkey() {
     dispatch_sync(dispatch_get_main_queue(), ^{
-        for (int i = 0; i < 5; i++) {
+        for (int i = 0; i < 9; i++) {
             if (_hotKeyRefs[i]) { UnregisterEventHotKey(_hotKeyRefs[i]); _hotKeyRefs[i] = NULL; }
         }
         if (_hotKeyHandlerRef) { RemoveEventHandler(_hotKeyHandlerRef);  _hotKeyHandlerRef = NULL; }
@@ -756,10 +771,11 @@ static void restoreOutputDevice(void) {
 }
 
 // restartMicCapture re-pins AVAudioEngine to the built-in mic and restarts it
-// after an AVAudioEngineConfigurationChangeNotification.  macOS automatically
-// stops the engine and removes all taps before posting that notification, so
-// we only need to re-install the tap and restart.  Called when the user plugs
-// in or unplugs headphones while a recording is in progress.
+// after an AVAudioEngineConfigurationChangeNotification.  macOS usually removes
+// all taps before posting that notification, but it is not guaranteed — some
+// hardware-change paths leave the tap in place, which causes a fatal assertion
+// in installTapOnBus.  We always remove defensively before re-installing.
+// Called when the user plugs in or unplugs headphones while recording.
 static void restartMicCapture(void) {
     if (!_audioEngine || !_isRecording || !_micAudioFile) return;
 
@@ -775,11 +791,19 @@ static void restartMicCapture(void) {
             &builtIn, sizeof(builtIn));
     }
 
-    _micRecordingFmt = [inputNode outputFormatForBus:0];
+    // Remove any existing tap before re-installing — macOS does not guarantee
+    // the tap is gone when AVAudioEngineConfigurationChangeNotification fires.
+    [inputNode removeTapOnBus:0];
 
-    // Re-install the tap — system has already removed it.
-    [inputNode installTapOnBus:0 bufferSize:4096 format:_micAudioFile.processingFormat
+    // Reset so the first callback below picks up the new hardware format.
+    // This keeps _micRecordingFmt in sync for rotateChunk after a mic switch.
+    _micRecordingFmt = nil;
+
+    // Use nil format for the same reason as startCapture: outputFormatForBus:0
+    // may return a stale value right after AudioUnitSetProperty on some Macs.
+    [inputNode installTapOnBus:0 bufferSize:4096 format:nil
                          block:^(AVAudioPCMBuffer *buf, AVAudioTime *when) {
+        if (_micRecordingFmt == nil) _micRecordingFmt = buf.format;
         if (_micAudioFile) [_micAudioFile writeFromBuffer:buf error:nil];
         if (_chunkMicFile) [_chunkMicFile writeFromBuffer:buf error:nil];
     }];
@@ -789,6 +813,94 @@ static void restartMicCapture(void) {
     if (engErr) {
         NSLog(@"[lay] mic restart after device change failed: %@", engErr);
     }
+}
+
+// startMicOnlyCapture starts mic-only capture (no system audio) into outDir.
+// Skips Bluetooth aggregate device setup and ScreenCaptureKit entirely.
+// Returns NULL on success, or a malloc'd C string with the error message.
+static const char *startMicOnlyCapture(const char *outDir) {
+    if (_isRecording) return NULL;
+
+    NSString *dir = [NSString stringWithUTF8String:outDir];
+
+    // ── Microphone via AVAudioEngine ─────────────────────────────────────────
+
+    _audioEngine = [[AVAudioEngine alloc] init];
+    AVAudioInputNode *inputNode = [_audioEngine inputNode];
+
+    // Pin to built-in mic to avoid Bluetooth HFP profile activation.
+    AudioDeviceID builtIn = builtInInputDevice();
+    if (builtIn != kAudioObjectUnknown) {
+        AudioUnitSetProperty(inputNode.audioUnit,
+            kAudioOutputUnitProperty_CurrentDevice,
+            kAudioUnitScope_Global, 0,
+            &builtIn, sizeof(builtIn));
+    }
+
+    NSURL *micURL = [NSURL fileURLWithPath:
+        [dir stringByAppendingPathComponent:@"mic.caf"]];
+    NSURL *chunk0URL = [NSURL fileURLWithPath:
+        [dir stringByAppendingPathComponent:@"chunk-0.caf"]];
+
+    [inputNode installTapOnBus:0 bufferSize:4096 format:nil
+                         block:^(AVAudioPCMBuffer *buf, AVAudioTime *when) {
+        if (!_micAudioFile) {
+            _micRecordingFmt = buf.format;
+            _micAudioFile = [[AVAudioFile alloc] initForWriting:micURL
+                                                       settings:buf.format.settings
+                                                          error:nil];
+            _chunkMicFile = [[AVAudioFile alloc] initForWriting:chunk0URL
+                                                      settings:buf.format.settings
+                                                         error:nil];
+        }
+        if (_micAudioFile) [_micAudioFile writeFromBuffer:buf error:nil];
+        if (_chunkMicFile) [_chunkMicFile writeFromBuffer:buf error:nil];
+    }];
+
+    NSError *engErr = nil;
+    [_audioEngine startAndReturnError:&engErr];
+    if (engErr && engErr.code == -10868) {
+        NSLog(@"[lay] mic-only start failed with FormatNotSupported; retrying without built-in pin");
+        [inputNode removeTapOnBus:0];
+        [_audioEngine stop];
+        _audioEngine = [[AVAudioEngine alloc] init];
+        inputNode = [_audioEngine inputNode];
+
+        [inputNode installTapOnBus:0 bufferSize:4096 format:nil
+                             block:^(AVAudioPCMBuffer *buf, AVAudioTime *when) {
+            if (!_micAudioFile) {
+                _micRecordingFmt = buf.format;
+                _micAudioFile = [[AVAudioFile alloc] initForWriting:micURL
+                                                           settings:buf.format.settings
+                                                              error:nil];
+                _chunkMicFile = [[AVAudioFile alloc] initForWriting:chunk0URL
+                                                          settings:buf.format.settings
+                                                             error:nil];
+            }
+            if (_micAudioFile) [_micAudioFile writeFromBuffer:buf error:nil];
+            if (_chunkMicFile) [_chunkMicFile writeFromBuffer:buf error:nil];
+        }];
+
+        engErr = nil;
+        [_audioEngine startAndReturnError:&engErr];
+    }
+    if (engErr) {
+        [inputNode removeTapOnBus:0];
+        _audioEngine = nil;
+        _micAudioFile = nil;
+        return strdup(engErr.localizedDescription.UTF8String);
+    }
+
+    _engineConfigObserver = [[NSNotificationCenter defaultCenter]
+        addObserverForName:AVAudioEngineConfigurationChangeNotification
+                    object:_audioEngine
+                     queue:[NSOperationQueue mainQueue]
+                usingBlock:^(NSNotification *note) {
+        restartMicCapture();
+    }];
+
+    _isRecording = YES;
+    return NULL;
 }
 
 // startCapture starts both mic and system audio capture into outDir.
@@ -832,42 +944,66 @@ static const char *startCapture(const char *outDir) {
             &builtIn, sizeof(builtIn));
     }
 
-    // Re-query format after the device override so the file and tap use the
-    // correct (built-in mic) format rather than whatever was cached earlier.
-    AVAudioFormat *micFmt = [inputNode outputFormatForBus:0];
-
-    // Use native mic format for the CAF file so the processingFormat matches
-    // the tap buffer format exactly — no silent format-mismatch writes.
+    // Build the file URLs now; the AVAudioFile objects are created lazily on
+    // the first tap callback using the buffer's actual format.  This avoids
+    // the 'Input HW format and tap format not matching' crash that occurs on
+    // some Macs (e.g. M1) where outputFormatForBus:0 returns a stale cached
+    // value immediately after AudioUnitSetProperty switches to the built-in
+    // mic — the format does not yet reflect the actual hardware format that
+    // AVAudioEngine will use when it starts.
     NSURL *micURL = [NSURL fileURLWithPath:
         [dir stringByAppendingPathComponent:@"mic.caf"]];
-    NSError *micErr = nil;
-    _micAudioFile = [[AVAudioFile alloc] initForWriting:micURL
-                                               settings:micFmt.settings
-                                                  error:&micErr];
-    if (micErr) {
-        _audioEngine = nil;
-        return strdup(micErr.localizedDescription.UTF8String);
-    }
-
-    // Store format for live chunk file creation and open the first chunk.
-    _micRecordingFmt = micFmt;
     NSURL *chunk0URL = [NSURL fileURLWithPath:
         [dir stringByAppendingPathComponent:@"chunk-0.caf"]];
-    _chunkMicFile = [[AVAudioFile alloc] initForWriting:chunk0URL
-                                              settings:micFmt.settings
-                                                 error:nil];
 
-    // Install tap in the file's processingFormat so AVAudioEngine converts
-    // from the hardware format for us before we write.
-    AVAudioFormat *tapFmt = _micAudioFile.processingFormat;
-    [inputNode installTapOnBus:0 bufferSize:4096 format:tapFmt
+    // Pass nil format so AVAudioEngine uses the hardware format directly,
+    // then open the CAF files on the first callback with the real format.
+    [inputNode installTapOnBus:0 bufferSize:4096 format:nil
                          block:^(AVAudioPCMBuffer *buf, AVAudioTime *when) {
+        if (!_micAudioFile) {
+            _micRecordingFmt = buf.format;
+            _micAudioFile = [[AVAudioFile alloc] initForWriting:micURL
+                                                       settings:buf.format.settings
+                                                          error:nil];
+            _chunkMicFile = [[AVAudioFile alloc] initForWriting:chunk0URL
+                                                      settings:buf.format.settings
+                                                         error:nil];
+        }
         if (_micAudioFile) [_micAudioFile writeFromBuffer:buf error:nil];
         if (_chunkMicFile) [_chunkMicFile writeFromBuffer:buf error:nil];
     }];
 
     NSError *engErr = nil;
     [_audioEngine startAndReturnError:&engErr];
+    if (engErr && engErr.code == -10868) { // kAudioUnitErr_FormatNotSupported
+        // A meeting app (Zoom, Teams, etc.) may have reconfigured the Core Audio
+        // HAL to a voice-optimized format, causing the device-pinned engine to
+        // fail with FormatNotSupported.  Retry without pinning so AVAudioEngine
+        // negotiates whatever format the HAL currently provides.
+        NSLog(@"[lay] mic start failed with FormatNotSupported; retrying without built-in pin");
+        [inputNode removeTapOnBus:0];
+        [_audioEngine stop];
+        _audioEngine = [[AVAudioEngine alloc] init];
+        inputNode = [_audioEngine inputNode];
+
+        [inputNode installTapOnBus:0 bufferSize:4096 format:nil
+                             block:^(AVAudioPCMBuffer *buf, AVAudioTime *when) {
+            if (!_micAudioFile) {
+                _micRecordingFmt = buf.format;
+                _micAudioFile = [[AVAudioFile alloc] initForWriting:micURL
+                                                           settings:buf.format.settings
+                                                              error:nil];
+                _chunkMicFile = [[AVAudioFile alloc] initForWriting:chunk0URL
+                                                          settings:buf.format.settings
+                                                             error:nil];
+            }
+            if (_micAudioFile) [_micAudioFile writeFromBuffer:buf error:nil];
+            if (_chunkMicFile) [_chunkMicFile writeFromBuffer:buf error:nil];
+        }];
+
+        engErr = nil;
+        [_audioEngine startAndReturnError:&engErr];
+    }
     if (engErr) {
         [inputNode removeTapOnBus:0];
         _audioEngine = nil;
@@ -1040,6 +1176,7 @@ func SetAccessoryPolicy() {
 	C.setAccessoryPolicy()
 }
 
+
 func RegisterGlobalHotkey() {
 	C.registerGlobalHotkey()
 }
@@ -1060,6 +1197,18 @@ func StartCapture(dir string) error {
 	cs := C.CString(dir)
 	defer C.free(unsafe.Pointer(cs))
 	errStr := C.startCapture(cs)
+	if errStr != nil {
+		msg := C.GoString(errStr)
+		C.free(unsafe.Pointer(errStr))
+		return errors.New(msg)
+	}
+	return nil
+}
+
+func StartMicOnlyCapture(dir string) error {
+	cs := C.CString(dir)
+	defer C.free(unsafe.Pointer(cs))
+	errStr := C.startMicOnlyCapture(cs)
 	if errStr != nil {
 		msg := C.GoString(errStr)
 		C.free(unsafe.Pointer(errStr))
