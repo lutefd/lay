@@ -23,14 +23,28 @@ type App struct {
 }
 
 type Config struct {
-	AnthropicKey string `json:"anthropicKey"`
-	OpenAIKey    string `json:"openaiKey"`
-	Model        string `json:"model"`
+	AnthropicKey   string `json:"anthropicKey"`
+	OpenAIKey      string `json:"openaiKey"`
+	Model          string `json:"model"`
+	GatewayURL     string `json:"gatewayURL"`     // full gateway endpoint URL, or "" (disabled)
+	TranscribeLang string `json:"transcribeLang"` // whisper -l value, "" or "auto" means auto-detect
+}
+
+type GatewayModel struct {
+	Value string `json:"value"`
+	Label string `json:"label"`
+}
+
+type GatewayConfig struct {
+	Name   string         `json:"name"`
+	URL    string         `json:"url"`
+	Models []GatewayModel `json:"models"`
 }
 
 type Message struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role    string   `json:"role"`
+	Content string   `json:"content"`
+	Images  []string `json:"images,omitempty"` // base64-encoded image data
 }
 
 func New() *App {
@@ -82,8 +96,23 @@ func (a *App) GetConfig() Config {
 	return cfg
 }
 
-func (a *App) SaveConfig(anthropicKey string, openAIKey string, model string) error {
-	cfg := Config{AnthropicKey: anthropicKey, OpenAIKey: openAIKey, Model: model}
+func (a *App) GetGatewayConfig() *GatewayConfig {
+	data, err := os.ReadFile(filepath.Join(layDir(), "gateway.json"))
+	if err != nil {
+		return nil
+	}
+	var gw GatewayConfig
+	if json.Unmarshal(data, &gw) != nil {
+		return nil
+	}
+	if gw.Name == "" || gw.URL == "" {
+		return nil
+	}
+	return &gw
+}
+
+func (a *App) SaveConfig(anthropicKey string, openAIKey string, model string, gatewayURL string, transcribeLang string) error {
+	cfg := Config{AnthropicKey: anthropicKey, OpenAIKey: openAIKey, Model: model, GatewayURL: gatewayURL, TranscribeLang: transcribeLang}
 	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		return err
@@ -103,6 +132,7 @@ func (a *App) SendMessage(conversationJSON string) (string, error) {
 		AnthropicKey: cfg.AnthropicKey,
 		OpenAIKey:    cfg.OpenAIKey,
 		Model:        cfg.Model,
+		GatewayURL:   cfg.GatewayURL,
 	}
 
 	aiMessages := make([]ai.Message, 0, len(messages))
@@ -110,10 +140,30 @@ func (a *App) SendMessage(conversationJSON string) (string, error) {
 		aiMessages = append(aiMessages, ai.Message{
 			Role:    m.Role,
 			Content: m.Content,
+			Images:  m.Images,
 		})
 	}
 
 	return a.aiClient.Send(context.Background(), aiCfg, a.systemPrompt(), aiMessages)
+}
+
+func (a *App) ExportToFile(content string, path string) error {
+	if path == "" {
+		return nil
+	}
+	if !strings.HasSuffix(path, ".md") {
+		path += ".md"
+	}
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(path, []byte(content), 0o644)
+}
+
+func (a *App) GetHomePath() string {
+	home, _ := os.UserHomeDir()
+	return home
 }
 
 func (a *App) systemPrompt() string {
