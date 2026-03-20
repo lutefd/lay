@@ -78,7 +78,8 @@ func (a *App) Transcribe(recordingDir string) (string, error) {
 	micPath := filepath.Join(recordingDir, "mic.caf")
 	sysPath := filepath.Join(recordingDir, "system.caf")
 
-	transcript, err := transcribeDual(whisperBin, modelPath, micPath, sysPath, 0)
+	lang := a.GetConfig().TranscribeLang
+	transcript, err := transcribeDual(whisperBin, modelPath, micPath, sysPath, 0, lang)
 	if err != nil {
 		return "", err
 	}
@@ -153,8 +154,9 @@ func (a *App) processChunk(micCaf string, seq int) {
 
 	sysCaf := chunkSysPath(micCaf)
 
+	lang := a.GetConfig().TranscribeLang
 	offsetSecs := float64(seq) * liveChunkInterval.Seconds()
-	text, err := transcribeDual(whisperBin, modelPath, micCaf, sysCaf, offsetSecs)
+	text, err := transcribeDual(whisperBin, modelPath, micCaf, sysCaf, offsetSecs, lang)
 	os.Remove(micCaf)
 	os.Remove(sysCaf)
 	if err != nil || text == "" {
@@ -206,6 +208,136 @@ func (a *App) emitCaptureEvents() {
 	}
 }
 
+func (a *App) StartMicOnlyRecording() (string, error) {
+	a.currentTranscript = ""
+	a.liveMu.Lock()
+	a.liveSegments = nil
+	a.liveChunkSeq = 0
+	a.liveMu.Unlock()
+
+	dir, err := recordingsDir()
+	if err != nil {
+		return "", err
+	}
+	if err := platform.StartMicOnlyCapture(dir); err != nil {
+		return "", err
+	}
+	for {
+		if _, ok := platform.ConsumeCaptureEvent(); !ok {
+			break
+		}
+	}
+
+	liveCtx, cancel := context.WithCancel(a.ctx)
+	a.liveCancel = cancel
+	go a.liveMicOnlyLoop(liveCtx, dir)
+
+	return dir, nil
+}
+
+func (a *App) TranscribeMicOnly(recordingDir string) (string, error) {
+	whisperBin, err := findWhisper()
+	if err != nil {
+		return "", err
+	}
+	modelPath, err := findFinalModel()
+	if err != nil {
+		return "", err
+	}
+
+	micPath := filepath.Join(recordingDir, "mic.caf")
+
+	lang := a.GetConfig().TranscribeLang
+	transcript, err := transcribeMicSolo(whisperBin, modelPath, micPath, 0, lang)
+	if err != nil {
+		return "", err
+	}
+	if transcript == "" {
+		return "", fmt.Errorf("no transcript produced — check whisper setup and audio")
+	}
+
+	if err := saveTranscript(recordingDir, transcript); err != nil {
+		return "", fmt.Errorf("save transcript: %w", err)
+	}
+
+	a.currentTranscript = transcript
+	os.RemoveAll(recordingDir)
+	return transcript, nil
+}
+
+func (a *App) liveMicOnlyLoop(ctx context.Context, dir string) {
+	chunkTicker := time.NewTicker(liveChunkInterval)
+	defer chunkTicker.Stop()
+	eventTicker := time.NewTicker(captureEventPollInterval)
+	defer eventTicker.Stop()
+
+	jobs := make(chan liveChunkJob, liveChunkQueueSize)
+	go func() {
+		for job := range jobs {
+			a.processMicOnlyChunk(job.micPath, job.seq)
+		}
+	}()
+
+	for {
+		select {
+		case <-ctx.Done():
+			close(jobs)
+			return
+		case <-eventTicker.C:
+			for {
+				msg, ok := platform.ConsumeCaptureEvent()
+				if !ok {
+					break
+				}
+				runtime.EventsEmit(a.ctx, "voice:warning", msg)
+			}
+		case <-chunkTicker.C:
+			a.liveMu.Lock()
+			seq := a.liveChunkSeq
+			a.liveChunkSeq++
+			a.liveMu.Unlock()
+
+			newMic := filepath.Join(dir, fmt.Sprintf("chunk-%d.caf", seq+1))
+			if err := platform.RotateChunk(newMic); err != nil {
+				runtime.EventsEmit(a.ctx, "voice:warning",
+					"Live chunk rotation failed; recording continues but live transcript may skip updates.")
+				continue
+			}
+			oldMic := filepath.Join(dir, fmt.Sprintf("chunk-%d.caf", seq))
+			job := liveChunkJob{micPath: oldMic, seq: seq}
+			select {
+			case jobs <- job:
+			default:
+				os.Remove(oldMic)
+				runtime.EventsEmit(a.ctx, "voice:warning",
+					"Live transcription is falling behind; skipped one chunk to keep recording stable.")
+			}
+		}
+	}
+}
+
+func (a *App) processMicOnlyChunk(micCaf string, seq int) {
+	whisperBin, err := findWhisper()
+	if err != nil {
+		return
+	}
+	modelPath, err := findLiveModel()
+	if err != nil {
+		return
+	}
+
+	lang := a.GetConfig().TranscribeLang
+	offsetSecs := float64(seq) * liveChunkInterval.Seconds()
+	text, err := transcribeMicSolo(whisperBin, modelPath, micCaf, offsetSecs, lang)
+	os.Remove(micCaf)
+	if err != nil || text == "" {
+		return
+	}
+
+	a.appendLiveSegment(text)
+	runtime.EventsEmit(a.ctx, "voice:segment", text)
+}
+
 func (a *App) AppendTranscriptToNotes(recordingDir string) error {
 	session := filepath.Base(recordingDir)
 	src := filepath.Join(layDir(), "transcripts", session+".md")
@@ -227,16 +359,16 @@ func (a *App) AppendTranscriptToNotes(recordingDir string) error {
 
 const minWavBytes = 16000 * 2 / 2 // 0.5 s × 16000 Hz × 2 bytes, ÷2 safety margin
 
-func transcribeDual(whisperBin, modelPath, micCaf, sysCaf string, offsetSecs float64) (string, error) {
-	micRaw := whisperOnCaf(whisperBin, modelPath, micCaf)
-	sysRaw := whisperOnCaf(whisperBin, modelPath, sysCaf)
+func transcribeDual(whisperBin, modelPath, micCaf, sysCaf string, offsetSecs float64, lang string) (string, error) {
+	micRaw := whisperOnCaf(whisperBin, modelPath, micCaf, lang)
+	sysRaw := whisperOnCaf(whisperBin, modelPath, sysCaf, lang)
 	if micRaw == "" && sysRaw == "" {
 		return "", nil
 	}
 	return mergeTranscripts(micRaw, sysRaw, offsetSecs), nil
 }
 
-func whisperOnCaf(whisperBin, modelPath, cafPath string) string {
+func whisperOnCaf(whisperBin, modelPath, cafPath, lang string) string {
 	if fi, err := os.Stat(cafPath); err != nil || fi.Size() == 0 {
 		return ""
 	}
@@ -248,7 +380,7 @@ func whisperOnCaf(whisperBin, modelPath, cafPath string) string {
 	if fi, err := os.Stat(wavPath); err != nil || fi.Size() < minWavBytes {
 		return ""
 	}
-	out, _ := runWhisper(whisperBin, modelPath, wavPath)
+	out, _ := runWhisper(whisperBin, modelPath, wavPath, lang)
 	return out
 }
 
@@ -411,8 +543,15 @@ func findFinalModel() (string, error) {
 	return findLiveModel()
 }
 
-func runWhisper(bin, model, audio string) (string, error) {
-	cmd := exec.Command(bin, "-m", model, "-f", audio, "-l", "auto")
+func whisperLang(lang string) string {
+	if lang == "" {
+		return "auto"
+	}
+	return lang
+}
+
+func runWhisper(bin, model, audio, lang string) (string, error) {
+	cmd := exec.Command(bin, "-m", model, "-f", audio, "-l", whisperLang(lang))
 	cmd.Stderr = io.Discard
 	out, err := cmd.Output()
 	if err != nil {
@@ -438,6 +577,56 @@ func recordingsDir() (string, error) {
 		return "", err
 	}
 	return dir, nil
+}
+
+// transcribeMicSolo transcribes a single mic file with noise-reduction
+// Whisper parameters and returns plain timestamped text (no speaker labels).
+func transcribeMicSolo(whisperBin, modelPath, micCaf string, offsetSecs float64, lang string) (string, error) {
+	raw := whisperOnCafDenoised(whisperBin, modelPath, micCaf, lang)
+	if raw == "" {
+		return "", nil
+	}
+	segs := parseSegments(raw, "you")
+	for i := range segs {
+		segs[i].start += offsetSecs
+		segs[i].end += offsetSecs
+	}
+	var sb strings.Builder
+	for _, s := range segs {
+		sb.WriteString(fmt.Sprintf("[%s] %s\n", formatTS(s.start), s.text))
+	}
+	return strings.TrimSpace(sb.String()), nil
+}
+
+func whisperOnCafDenoised(whisperBin, modelPath, cafPath, lang string) string {
+	if fi, err := os.Stat(cafPath); err != nil || fi.Size() == 0 {
+		return ""
+	}
+	wavPath := cafPath + ".wav"
+	if err := afconvert(cafPath, wavPath); err != nil {
+		return ""
+	}
+	defer os.Remove(wavPath)
+	if fi, err := os.Stat(wavPath); err != nil || fi.Size() < minWavBytes {
+		return ""
+	}
+	out, _ := runWhisperDenoised(whisperBin, modelPath, wavPath, lang)
+	return out
+}
+
+// runWhisperDenoised runs Whisper with higher entropy and log-probability
+// thresholds to suppress uncertain/noisy segments on mic-only recordings.
+// Falls back to standard parameters if the installed whisper-cli is older
+// and does not recognise the extra flags.
+func runWhisperDenoised(bin, model, audio, lang string) (string, error) {
+	cmd := exec.Command(bin, "-m", model, "-f", audio, "-l", whisperLang(lang),
+		"--entropy-thold", "2.8", "--logprob-thold", "-0.5")
+	cmd.Stderr = io.Discard
+	out, err := cmd.Output()
+	if err == nil {
+		return strings.TrimSpace(string(out)), nil
+	}
+	return runWhisper(bin, model, audio, lang)
 }
 
 func parseWhisperTS(s string) float64 {
