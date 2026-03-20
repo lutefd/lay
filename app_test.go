@@ -19,15 +19,20 @@ type fakeService struct {
 func (f *fakeService) Startup(ctx context.Context) { f.started, f.ctx = true, ctx }
 func (f *fakeService) GetNotes() string            { return f.notes }
 func (f *fakeService) SaveNotes(_ string) error    { return f.err }
-func (f *fakeService) GetConfig() core.Config      { return f.cfg }
-func (f *fakeService) SaveConfig(_, _, _ string) error {
+func (f *fakeService) GetConfig() core.Config              { return f.cfg }
+func (f *fakeService) GetGatewayConfig() *core.GatewayConfig { return nil }
+func (f *fakeService) SaveConfig(_, _, _, _, _ string) error {
 	return f.err
 }
 func (f *fakeService) SendMessage(_ string) (string, error)   { return "ok", f.err }
-func (f *fakeService) StartRecording() (string, error)        { return "/tmp/r", f.err }
-func (f *fakeService) StopRecording() error                   { return f.err }
-func (f *fakeService) Transcribe(_ string) (string, error)    { return "tx", f.err }
-func (f *fakeService) AppendTranscriptToNotes(_ string) error { return f.err }
+func (f *fakeService) StartRecording() (string, error)         { return "/tmp/r", f.err }
+func (f *fakeService) StopRecording() error                    { return f.err }
+func (f *fakeService) Transcribe(_ string) (string, error)     { return "tx", f.err }
+func (f *fakeService) StartMicOnlyRecording() (string, error)  { return "/tmp/r", f.err }
+func (f *fakeService) TranscribeMicOnly(_ string) (string, error) { return "tx", f.err }
+func (f *fakeService) AppendTranscriptToNotes(_ string) error   { return f.err }
+func (f *fakeService) ExportToFile(_, _ string) error { return f.err }
+func (f *fakeService) GetHomePath() string            { return "/tmp" }
 
 func TestAppWrapperDelegates(t *testing.T) {
 	f := &fakeService{

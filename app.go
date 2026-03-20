@@ -11,12 +11,17 @@ type appService interface {
 	GetNotes() string
 	SaveNotes(content string) error
 	GetConfig() core.Config
-	SaveConfig(anthropicKey string, openAIKey string, model string) error
+	GetGatewayConfig() *core.GatewayConfig
+	SaveConfig(anthropicKey string, openAIKey string, model string, gatewayURL string, transcribeLang string) error
 	SendMessage(conversationJSON string) (string, error)
 	StartRecording() (string, error)
 	StopRecording() error
 	Transcribe(recordingDir string) (string, error)
+	StartMicOnlyRecording() (string, error)
+	TranscribeMicOnly(recordingDir string) (string, error)
 	AppendTranscriptToNotes(recordingDir string) error
+	ExportToFile(content string, path string) error
+	GetHomePath() string
 }
 
 type App struct {
@@ -43,8 +48,12 @@ func (a *App) GetConfig() core.Config {
 	return a.service.GetConfig()
 }
 
-func (a *App) SaveConfig(anthropicKey string, openAIKey string, model string) error {
-	return a.service.SaveConfig(anthropicKey, openAIKey, model)
+func (a *App) GetGatewayConfig() *core.GatewayConfig {
+	return a.service.GetGatewayConfig()
+}
+
+func (a *App) SaveConfig(anthropicKey string, openAIKey string, model string, gatewayURL string, transcribeLang string) error {
+	return a.service.SaveConfig(anthropicKey, openAIKey, model, gatewayURL, transcribeLang)
 }
 
 func (a *App) SendMessage(conversationJSON string) (string, error) {
@@ -63,6 +72,22 @@ func (a *App) Transcribe(recordingDir string) (string, error) {
 	return a.service.Transcribe(recordingDir)
 }
 
+func (a *App) StartMicOnlyRecording() (string, error) {
+	return a.service.StartMicOnlyRecording()
+}
+
+func (a *App) TranscribeMicOnly(recordingDir string) (string, error) {
+	return a.service.TranscribeMicOnly(recordingDir)
+}
+
 func (a *App) AppendTranscriptToNotes(recordingDir string) error {
 	return a.service.AppendTranscriptToNotes(recordingDir)
+}
+
+func (a *App) ExportToFile(content string, path string) error {
+	return a.service.ExportToFile(content, path)
+}
+
+func (a *App) GetHomePath() string {
+	return a.service.GetHomePath()
 }
